@@ -1,4 +1,4 @@
 ARTful
 ======
 
-ARTful radix tree preliminary version with support for inserts
+ARTful radix tree preliminary version with initial support for inserts
