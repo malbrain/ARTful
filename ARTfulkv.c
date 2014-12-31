@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <memory.h>
 #include <string.h>
+#include <stdio.h>
 
 #include <xmmintrin.h>
 #include <linux/futex.h>
@@ -13,17 +14,6 @@
 
 typedef unsigned char uchar;
 typedef unsigned int uint;
-
-typedef struct {
-  union {
-	struct {
-	  volatile unsigned char xcl[1];
-	  volatile unsigned char filler;
-	  volatile ushort waiters[1];
-	} bits[1];
-	uint value[1];
-  };
-} Mutex;
 
 enum NodeType {
 	UnusedNode = 0, // node is not yet in use
@@ -37,10 +27,9 @@ enum NodeType {
 
 typedef struct {
 	void *node;			// node sub-contents
-	Mutex mutex[1];		// manipulation latch
+	uchar mutex[1];		// manipulation latch
 	uchar nslot;		// number of slots in radix array in use
 	uchar type;			// type of radix node
-	uchar fill;			// unused filler
 	uchar min;			// unused span bytes
 } ARTslot;
 
@@ -100,43 +89,36 @@ int sys_futex(void *addr1, int op, int val1, struct timespec *timeout, void *add
 	return syscall(SYS_futex, addr1, op, val1, timeout, addr2, val3);
 }
 
-void mutexlock(Mutex *latch)
+#define relax() asm volatile("pause\n": : : "memory")
+
+void mutexlock(uchar *latch)
 {
-uint idx, waited = 0;
-Mutex prev[1];
-
- while( 1 ) {
-  for( idx = 0; idx < 50; idx++ ) {
-	*prev->value = __sync_fetch_and_or (latch->value, 1);
-	if( !*prev->bits->xcl ) {
-	  if( waited )
-		__sync_fetch_and_sub (latch->bits->waiters, 1);
-	  return;
-	}
-  }
-
-  if( !waited ) {
-	__sync_fetch_and_add (latch->bits->waiters, 1);
-	*prev->bits->waiters += 1;
-	waited++;
-  }
-
-  sys_futex (latch->value, FUTEX_WAIT_PRIVATE, *prev->value, NULL, NULL, 0);
- }
+  while( __sync_lock_test_and_set (latch, 1) )
+	while( latch[0] )
+		relax();
 }
 
-void mutexrelease(Mutex *latch)
+void mutexrelease(uchar *latch)
 {
-Mutex prev[1];
+	__sync_synchronize();
+	*latch = 0;
+}
 
-	*prev->value = __sync_fetch_and_and (latch->value, 0xffff0000);
+void slotlock (ARTslot *slot)
+{
+	if( (volatile)slot->type == Array256 )
+		return;
 
-	if( *prev->bits->waiters )
-		sys_futex( latch->value, FUTEX_WAKE_PRIVATE, 1, NULL, NULL, 0 );
+	mutexlock (slot->mutex);
+
+	if( (volatile)slot->type < Array256 )
+		return;
+
+	mutexrelease (slot->mutex);
 }
 
 unsigned long int ArenaOffset = 1024UL * 1024UL*1024UL *12;
-Mutex ArenaMutex[1];
+uchar ArenaMutex[1];
 uchar *Arena;
 
 uint Census[8];
@@ -150,8 +132,8 @@ void art_free (ARTtrie *trie, uchar type, void *what)
 
 void *art_node (ARTtrie *trie, uchar type)
 {
+uint size, xtra;
 void *node;
-uint size;
 
 	switch( type ) {
 	case SpanNode:
@@ -170,6 +152,9 @@ uint size;
 		size = sizeof(ARTnode256);
 		break;
 	}
+
+	if( xtra = size & 0x7 )
+		size += 8 - xtra;
 
 	if( ArenaOffset < size )
 		abort();
@@ -195,10 +180,10 @@ ARTcursor *cursor = calloc (1, sizeof(ARTcursor) + depth * sizeof(ARTstack));
 ARTtrie *ARTnew ()
 {
 ARTtrie *trie = calloc (1, sizeof(ARTtrie));
+ARTnode256 *radix256, *root256;
+uint idx;
 
 	Arena = malloc(ArenaOffset);
-	trie->root->node = art_node(trie, Array256);
-	trie->root->type = Array256;
 	return trie;
 }
 
@@ -245,9 +230,7 @@ ARTspan *span;
 uint off = 0;
 
 	slot = trie->root;
-
-	if( slot->type < Array256 )
-	  mutexlock (slot->mutex);
+	slotlock (slot);
 
 	while( prev = slot, off < keylen && slot->type )
 	  switch( slot->type ) {
@@ -271,8 +254,7 @@ uint off = 0;
 
 		off += idx;
 		slot = span->next;
-		if( slot->type < Array256 )
-			mutexlock (slot->mutex);
+		slotlock (slot);
 		mutexrelease (prev->mutex);
 		continue;
 
@@ -290,9 +272,7 @@ uint off = 0;
 		}
 
 		slot = radix4->radix + idx;
-
-		if( slot->type < Array256 )
-		  mutexlock (slot->mutex);
+		slotlock (slot);
 
 		mutexrelease (prev->mutex);
 		off++;
@@ -312,9 +292,7 @@ uint off = 0;
 		}
 
 		slot = radix16->radix + idx;
-
-		if( slot->type < Array256 )
-		  mutexlock (slot->mutex);
+		slotlock (slot);
 
 		mutexrelease (prev->mutex);
 		off++;
@@ -329,9 +307,7 @@ uint off = 0;
 		}
 
 		slot = radix64->radix + radix64->keys[key[off++]];
-
-		if( slot->type < Array256 )
-		  mutexlock (slot->mutex);
+		slotlock (slot);
 
 		mutexrelease (prev->mutex);
 		continue;
@@ -345,8 +321,7 @@ uint off = 0;
 		  return NULL;
 		}
 
-		if( slot->type < Array256 )
-		  mutexlock (slot->mutex);
+		slotlock (slot);
 
 		mutexrelease (prev->mutex);
 		continue;
@@ -367,8 +342,8 @@ uint off = 0;
 
 void *ARTinsert (ARTtrie *trie, uchar *key, uint keylen, void *value)
 {
+uint len, idx, idx2, min, max;
 ARTslot *prev, *slot, *slot2;
-uint len, idx, idx2, min;
 ARTspan *span, *span2;
 ARTnode4 *radix4;
 ARTnode16 *radix16;
@@ -378,15 +353,13 @@ void *oldvalue;
 uint off = 0;
 
 	slot = trie->root;
-
-	if( slot->type < Array256 )
-	  mutexlock (slot->mutex);
+	slotlock (slot);
 
 	while( prev = slot, off < keylen && slot->type )
 	  switch( slot->type ) {
 	  case SpanNode:
 		span = (ARTspan*)slot->node;
-		len = slot->nslot;
+		max = len = slot->nslot;
 		min = slot->min;
 
 		if( len > keylen - off + min )
@@ -400,10 +373,9 @@ uint off = 0;
 
 		// did we use the entire span node?
 
-		if( idx + min == slot->nslot ) {
+		if( idx + min == max ) {
 		  slot = span->next;
-		  if( slot->type < Array256 )
-			mutexlock (slot->mutex);
+		  slotlock (slot);
 		  mutexrelease (prev->mutex);
 		  continue;
 		}
@@ -414,60 +386,63 @@ uint off = 0;
 		radix4 = art_node(trie, Array4);
 		radix4->keys[0] = span->bytes[idx + min];
 
+		if( span->next->type == LeafPtr )
+		  radix4->value = slot->node;
+
 		// truncate original span node to prefix bytes
 
 		if( idx ) {
 		  slot->nslot = min + idx;
 		  slot = span->next;
-		  slot->node = radix4;
 		}
 
 		// else cut it from the tree by transforming
 		// the original slot to radix type
 
 		else {
-		  art_free (trie, slot->type, slot->node);	// free span node
+		  slot->nslot = 1 + (off < keylen);
 		  slot->type = Array4;
-		  slot->node = radix4;	// replace with radix node
 		  slot->min = 0;
 		}
+
+		slot->node = radix4;
+
+		// are there any original span bytes remaining?
+		// place them under first radix branch
+
+		if( idx + min + 1 < max )
+		 if( idx ) {
+		  span2 = art_node(trie, SpanNode);
+		  slot = radix4->radix + 0;	// first radix element
+		  *span2 = *span;
+		  slot->nslot = max;
+		  slot->node = span2;
+		  slot->type = SpanNode;
+		  slot->min = min + idx + 1;
+		 } else {
+		  slot = radix4->radix + 0;	// first radix element
+		  slot->node = span;
+		  slot->nslot = max;
+		  slot->type = SpanNode;
+		  slot->min = min + idx + 1;
+		} else if( !idx )
+		  art_free (trie, SpanNode, span);	// free span node
 
 		// does our key terminate at the radix node?
 
 		if( off == keylen ) {
 		  radix4->value = value;
-		  oldvalue = NULL;
-		  slot->nslot = 1;
-		} else {				// otherwise there are two radix elements
-		  radix4->keys[1] = key[(off)++];
-		  slot->nslot = 2;
-		}
-
-		// are there any original span bytes remaining?
-		// place them under first radix branch
-
-		if( idx + min < prev->nslot ) {
-		  span2 = art_node(trie, SpanNode);
-		  slot = radix4->radix + 0;	// first radix element
-		  *span2 = *span;
-		  slot->node = span2;
-		  slot->type = SpanNode;
-		  slot->nslot = prev->nslot;
-		  slot->min += idx + 1;
-		}
-
-		// are there no key bytes left?
-
-		if( off == keylen ) {
 		  mutexrelease (prev->mutex);
-		  return oldvalue;
+		  return NULL;
 		}
 
-		// otherwise loop to process them
+		// otherwise there are two radix elements
+		// loop to process the second
 
 		slot = radix4->radix + 1;	// second radix element
-		if( slot->type < Array256 )
-		  mutexlock (slot->mutex);
+		radix4->keys[1] = key[off++];
+
+		slotlock (slot);
 		mutexrelease (prev->mutex);
 		continue;
 
@@ -483,7 +458,7 @@ uint off = 0;
 		slot->type = Array4;
 		slot = radix4->radix + 0;
 
-		mutexlock (slot->mutex);
+		slotlock (slot);
 		mutexrelease (prev->mutex);
 		continue;
 
@@ -496,8 +471,7 @@ uint off = 0;
 
 		if( idx < slot->nslot ) {
 		  slot = radix4->radix + idx;
-		  if( slot->type < Array256 )
-			mutexlock (slot->mutex);
+		  slotlock (slot);
 		  mutexrelease (prev->mutex);
 		  off++;
 		  continue;
@@ -508,7 +482,7 @@ uint off = 0;
 		if( slot->nslot < 4 ) {
 		  radix4->keys[slot->nslot] = key[off++];
 		  slot = radix4->radix + slot->nslot++;
-		  mutexlock (slot->mutex);
+		  slotlock (slot);
 		  mutexrelease (prev->mutex);
 		  continue;
 		}
@@ -520,9 +494,9 @@ uint off = 0;
 
 		for( idx = 0; idx < slot->nslot; idx++ ) {
 		  slot2 = radix4->radix + idx;
-		  mutexlock (slot2->mutex);
+		  slotlock (slot2);
 		  radix16->radix[idx] = *slot2;
-		  *radix16->radix[idx].mutex->value = 0;
+		  *radix16->radix[idx].mutex = 0;
 		  radix16->keys[idx] = radix4->keys[idx];
 		  mutexrelease (slot2->mutex);
 		}
@@ -538,7 +512,7 @@ uint off = 0;
 		slot->node = radix16;
 
 		slot = radix16->radix + slot->nslot++;
-		mutexlock (slot->mutex);
+		slotlock (slot);
 		mutexrelease (prev->mutex);
 		continue;
 
@@ -553,8 +527,7 @@ uint off = 0;
 
 		if( idx < slot->nslot ) {
 		  slot = radix16->radix + idx;
-		  if( slot->type < Array256 )
-			mutexlock (slot->mutex);
+		  slotlock (slot);
 		  mutexrelease (prev->mutex);
 		  off++;
 		  continue;
@@ -565,7 +538,7 @@ uint off = 0;
 		if( slot->nslot < 16 ) {
 		  radix16->keys[slot->nslot] = key[off++];
 		  slot = radix16->radix + slot->nslot++;
-		  mutexlock (slot->mutex);
+		  slotlock (slot);
 		  mutexrelease (prev->mutex);
 		  continue;
 		}
@@ -578,10 +551,10 @@ uint off = 0;
 
 		for( idx = 0; idx < slot->nslot; idx++ ) {
 		  slot2 = radix16->radix + idx;
-		  mutexlock (slot2->mutex);
+		  slotlock (slot2);
 		  idx2 = radix16->keys[idx];
 		  radix64->radix[idx] = *slot2;
-		  *radix64->radix[idx].mutex->value = 0;
+		  *radix64->radix[idx].mutex = 0;
 		  radix64->keys[idx2] = idx;
 		  mutexrelease (slot2->mutex);
 		}
@@ -597,7 +570,7 @@ uint off = 0;
 		slot->node = radix64;
 
 		slot = radix64->radix + slot->nslot++;
-		mutexlock (slot->mutex);
+		slotlock (slot);
 		mutexrelease (prev->mutex);
 		continue;
 
@@ -608,8 +581,7 @@ uint off = 0;
 
 		if( radix64->keys[key[off]] < 0xff ) {
 		  slot = radix64->radix + radix64->keys[key[off++]];
-		  if( slot->type < Array256 )
-			mutexlock (slot->mutex);
+		  slotlock (slot);
 		  mutexrelease (prev->mutex);
 		  continue;
 		}
@@ -619,7 +591,7 @@ uint off = 0;
 		if( slot->nslot < 64 ) {
 		  radix64->keys[key[off++]] = slot->nslot;
 		  slot = radix64->radix + slot->nslot++;
-		  mutexlock (slot->mutex);
+		  slotlock (slot);
 		  mutexrelease (prev->mutex);
 		  continue;
 		}
@@ -633,9 +605,9 @@ uint off = 0;
 		 if( radix64->keys[idx] < 0xff ) {
 		  idx2 = radix64->keys[idx];
 		  slot2 = radix64->radix + idx2;
-		  mutexlock (slot2->mutex);
+		  slotlock (slot2);
 		  radix256->radix[idx] = *slot2;
-		  *radix256->radix[idx].mutex->value = 0;
+		  *radix256->radix[idx].mutex = 0;
 		  mutexrelease (slot2->mutex);
 		  }
 
@@ -651,17 +623,15 @@ uint off = 0;
 		//  leave the Array256 slot unlocked
 
 		slot = radix256->radix + key[off++];
-
-		mutexlock (slot->mutex);
+		slotlock (slot);
 		mutexrelease (prev->mutex);
 		continue;
 
 	  case Array256:
 		radix256 = (ARTnode256*)slot->node;
-
 		slot = radix256->radix + key[off++];
-		if( slot->type < Array256 )
-		  mutexlock (slot->mutex);  // don't unlock anything
+		slotlock (slot);  // don't unlock anything
+
 		continue;
 	}
 
@@ -690,7 +660,7 @@ uint off = 0;
 	}
 
 	if( slot->type ) {
-		radix4 = (ARTnode4 *)slot->node;
+		radix4 = (ARTnode4 *)slot->node;	// generic radix pointer
 		oldvalue = radix4->value;
 		radix4->value = value;
 		mutexrelease(prev->mutex);
@@ -706,7 +676,6 @@ uint off = 0;
 }
 
 #ifdef STANDALONE
-#include <stdio.h>
 #include <time.h>
 #include <sys/resource.h>
 
