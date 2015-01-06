@@ -1,7 +1,7 @@
 //	ARTful key-value store
 
 //	Author: Karl Malbrain, malbrain@cal.berkeley.edu
-//	Date:   31 DEC 14
+//	Date:   05 JAN 15
 
 #define _FILE_OFFSET_BITS 64
 #define _LARGEFILE64_SOURCE
@@ -150,6 +150,7 @@ uchar *Arena;
 int ArenaFd;		// arena file descriptor
 
 //	incremental amount to allocate to threads
+//	must be a power of two.
 
 #define ARENA_chunk (1024 * 1024)
 
@@ -166,16 +167,18 @@ ulong offset;
 	  if( thread->trie->arena_next + ARENA_chunk > thread->trie->arena_size ) {
 		thread->trie->arena_next = thread->trie->arena_size;
 		thread->trie->arena_size += ArenaInit;
+#ifdef PERSIST
 		ftruncate (ArenaFd, thread->trie->arena_size);
+#endif
 	  }
-	  thread->base = thread->trie->arena_next;
 	  thread->offset = 0;
+	  thread->base = thread->trie->arena_next;
 	  thread->trie->arena_next += ARENA_chunk;
 	  mutexrelease (thread->trie->arena_mutex);
 	}
 
 	offset = thread->offset + thread->base;
-	memset (Arena + offset, 0, size);
+//	memset (Arena + offset, 0, size);
 	thread->offset += size;
 	return offset;
 }
@@ -200,6 +203,8 @@ uint size, xtra;
 	case Array256:
 	  size = sizeof(ARTnode256);
 	  break;
+	default:
+	  abort();
 	}
 
 	if( xtra = size & 0x7 )
@@ -224,11 +229,11 @@ ARTthread *thread = calloc (1, sizeof(ARTthread));
 
 ARTtrie *ARTnew (int fd)
 {
+ARTnode256 *radix256, *root256, *next256;
 int flag = PROT_READ | PROT_WRITE;
-ARTnode256 *radix256, *root256;
 ARTtrie *trie;
 ulong offset;
-uint i;
+uint i, j;
 
 #ifdef PERSIST
 	if( !(offset = lseek64 (fd, 0L, 2)) )
@@ -259,9 +264,16 @@ uint i;
 		root256->radix[i].off = trie->arena_next;
 		trie->arena_next += sizeof(ARTnode256);
 		radix256->type = Array256;
+//		for( j = 0; j < 256; j++ ) { // fill in 3rd level
+//			next256 = (ARTnode256 *)(Arena + trie->arena_next);
+//			radix256[i].radix[j].off = trie->arena_next;
+//	  		trie->arena_next += sizeof(ARTnode256);
+//	  		next256->type = Array256;
+//		}
 	  }
 
-	  trie->arena_next = ARENA_chunk;
+	  trie->arena_next |= ARENA_chunk - 1;
+	  trie->arena_next++;
 	}
 
 	return trie;
@@ -308,23 +320,23 @@ ARTgeneric *generic;
 ulong oldvalue;
 ARTslot *slot;
 ARTspan *span;
+uchar *chr;
 
-	off = 0;
 	slot = thread->trie->root;
+	off = 0;
 
 	while( off < keylen ) {
-	  if( slot->off )
+	  if( !slot->leaf && slot->off )
 		generic = (ARTgeneric *)(Arena + slot->off);
 	  else
-		return 0;
-
-	  if( slot->leaf || !generic->type )
 		return 0;
 
 	  switch( generic->type ) {
 	  case SpanNode:
 		span = (ARTspan*)(Arena + slot->off);
 		len = keylen - off;
+
+		// would key end in the middle of the span?
 
 		if( len < slot->nslot )
 			return 0;
@@ -355,38 +367,45 @@ ARTspan *span;
 		radix16 = (ARTnode16 *)(Arena + slot->off);
 		len = slot->nslot;
 
-		for( idx = 0; idx < len; idx++ )
-		  if( key[off] == radix16->keys[idx] )
-			break;
+		// is key byte in radix node?
 
-		if( idx == len )
-		  return 0;
+		if( chr = memchr (radix16->keys, key[off++], slot->nslot) ) {
+		  idx = chr - radix16->keys;
+		  slot = radix16->radix + idx;
+		  continue;
+		}
 
-		slot = radix16->radix + idx;
-		off++;
-		continue;
+		return 0;
 
 	  case Array64:
 		radix64 = (ARTnode64 *)(Arena + slot->off);
+		idx = radix64->keys[key[off++]];
 
-		if( radix64->keys[key[off]] == 0xff )
+		if( idx == 0xff )
 		  return 0;
 
-		slot = radix64->radix + radix64->keys[key[off++]];
+		slot = radix64->radix + idx;
 		continue;
 
 	  case Array256:
 		radix256 = (ARTnode256 *)(Arena + slot->off);
 		slot = radix256->radix + key[off++];
 		continue;
+
+	  case UnusedNode:
+		return 0;
 	  }
 	}
 
 	if( slot->leaf )
 	  return slot->off;
 
-	generic = (ARTgeneric *)(Arena + slot->off);
-	return generic->value;
+	if( slot->off ) {
+	  generic = (ARTgeneric *)(Arena + slot->off);
+	  return generic->value;
+	}
+
+	return 0;
 }
 
 //	insert key/value into ARTful trie, returning old value offset
@@ -402,23 +421,32 @@ ARTnode16 *radix16;
 ARTnode64 *radix64;
 ARTnode256 *radix256;
 ARTgeneric *generic;
+uchar *chr, type;
 ulong oldvalue;
 
 	slot = thread->trie->root;
 	lock = NULL;
-	prev = NULL;
 	off = 0;
 
-	while( off < keylen ) {
+	while( 1 ) {
 	  node->bits = slot->bits;
-	  generic = (ARTgeneric *)(Arena + node->off);
+
+	  if( !node->leaf && node->off ) {
+	    generic = (ARTgeneric *)(Arena + node->off);
+		type = generic->type;
+	  } else
+		type = 0;
+
 	  update64 = NULL;
 	  prev = slot;
 
-	  if( !node->leaf )
-	   if( !lock && generic->type < Array256 ) {
+	  if( !lock )
+	   if( type < Array256 || off == keylen ) {
 		mutexlock (prev->mutex);
 		*node->mutex = 1;
+
+		//  see if slot changed values
+		//	and reload if so.
 
 		if( node->bits != prev->bits ) {
 		  mutexrelease (prev->mutex);
@@ -428,9 +456,11 @@ ulong oldvalue;
 		lock = prev;
 	   }
 
-	  if( !node->leaf )
-	   switch( generic->type ) {
-	   case SpanNode:
+	  if( off == keylen )
+		break;
+
+	  switch( type ) {
+	  case SpanNode:
 		span = (ARTspan*)(Arena + node->off);
 		max = len = node->nslot;
 
@@ -456,60 +486,61 @@ ulong oldvalue;
 		  span1 = (ARTspan *)(Arena + art_node(thread, SpanNode));
 		  memcpy (span1->bytes, span->bytes, idx);
 		  node->off = (uchar *)span1 - Arena;
+		  span1->value = span->value;
 		  span1->type = SpanNode;
 		  slot = span1->next;
 		  node->nslot = idx;
 		}
 
 		// else cut span from the tree by transforming
-		// the original node into the radix4 node
+		// the original node into a radix4 or span node
 
 		else
 		  slot = node;
 
-		// does our key terminate after the span node?
+		// place a radix node in after span1 and before span2
+		// if needed for additional key byte(s)
 
-		if( off == keylen )
-		  continue;
+		if( off < keylen ) {
+		  radix4 = (ARTnode4 *)(Arena + art_node(thread, Array4));
 
-		// break span node into two parts
-		// with radix node in between
+		  if( !idx )
+			radix4->value = span->value;
 
-		radix4 = (ARTnode4 *)(Arena + art_node(thread, Array4));
-		radix4->keys[0] = span->bytes[idx];
-		radix4->type = Array4;
+		  radix4->keys[0] = span->bytes[idx++];
+		  radix4->type = Array4;
 
-		slot->off = (uchar *)radix4 - Arena;
-		slot->nslot = 1 + (off < keylen);
+		  // fill in first radix element
 
-		slot = radix4->radix + 0;	// fill in first radix element
+		  slot->nslot = 2;
+		  slot->off = (uchar *)radix4 - Arena;
+		  slot = radix4->radix + 0;
+		}
 
-		// are there any span bytes remaining?
-		// place them under first radix branch
-		// in a new span node
+		// are there any original span bytes remaining?
+		// if so, place them in a second span node
 
-		if( idx + 1 < max ) {
+		if( max - idx ) {
 		  span2 = (ARTspan *)(Arena + art_node(thread, SpanNode));
-		  memcpy (span2->bytes, span->bytes + idx + 1, max - idx - 1);
+		  memcpy (span2->bytes, span->bytes + idx, max - idx);
 		  span2->type = SpanNode;
-		  slot->nslot = max - idx - 1;
+		  slot->nslot = max - idx;
 		  slot->off = (uchar *)span2 - Arena;
 		  *span2->next = *span->next;
 		} else
 		  *slot = *span->next;
 
-		// does our key terminate at the radix node?
+		//  does key stop at radix/span node?
+		//	if so, fill in span2->value below
 
 		if( off == keylen )
-		  continue;
-
-		// otherwise there are two radix elements
+		  break; 
 
 		slot = radix4->radix + 1;	// second radix element
 		radix4->keys[1] = key[off++];
 		break;
 
-	   case Array4:
+	  case Array4:
 		radix4 = (ARTnode4*)(Arena + node->off);
 
 		for( idx = 0; idx < node->nslot; idx++ )
@@ -548,16 +579,13 @@ ulong oldvalue;
 		slot = radix16->radix + node->nslot++;
 		break;
 
-	   case Array16:
+	  case Array16:
 		radix16 = (ARTnode16*)(Arena + node->off);
 
-		for( idx = 0; idx < node->nslot; idx++ )
-		  if( key[off] == radix16->keys[idx] )
-			break;
+		// is key byte in radix node?
 
-		// is key byte in radix node
-
-		if( idx < node->nslot ) {
+		if( chr = memchr (radix16->keys, key[off], node->nslot) ) {
+		  idx = chr - radix16->keys;
 		  slot = radix16->radix + idx;
 		  off++;
 		  continue;
@@ -591,13 +619,16 @@ ulong oldvalue;
 		slot = radix64->radix + node->nslot++;
 		break;
 
-	   case Array64:
+	  case Array64:
 		radix64 = (ARTnode64*)(Arena + node->off);
 
 		// is key already in radix node?
 
-		if( radix64->keys[key[off]] < 0xff ) {
-		  slot = radix64->radix + radix64->keys[key[off++]];
+		idx = radix64->keys[key[off]];
+
+		if( idx < 0xff ) {
+		  slot = radix64->radix + idx;
+		  off++;
 		  continue;
 		}
 
@@ -628,7 +659,7 @@ ulong oldvalue;
 		slot = radix256->radix + key[off++];
 		break;
 
-	   case Array256:
+	  case Array256:
 		radix256 = (ARTnode256*)(Arena + node->off);
 		slot = radix256->radix + key[off++];
 		continue;
@@ -636,10 +667,10 @@ ulong oldvalue;
 	 	// execution from case Array256 above
 		// will continue here on an empty slot
 
-	   case UnusedNode:
+	  case UnusedNode:
 		slot = node;
 		break;
-	   }
+	  }
 
 	  // fill in empty/leaf slot with remaining key bytes
 
@@ -648,7 +679,7 @@ ulong oldvalue;
 	  else
 		oldvalue = 0;
 
-	  // copy key bytes to span nodes
+	  // copy remaining key bytes to span nodes
 
 	  while( len = keylen - off ) {
 		span = (ARTspan *)(Arena + art_node(thread, SpanNode));
@@ -662,12 +693,19 @@ ulong oldvalue;
 		memcpy (span->bytes, key + off, len);
 		slot->off = (uchar *)span - Arena;
 		slot->nslot = len;
+		slot->leaf = 0;
+
 		slot = span->next;
 		off += len;
 	  }
 
-	  slot->off = valueoffset;
-	  slot->leaf = 1;
+	  if( slot->off && !slot->leaf ) {
+		generic = (ARTgeneric *)(Arena + slot->off);
+		generic->value = valueoffset;
+	  } else {
+		slot->off = valueoffset;
+		slot->leaf = 1;
+	  }
 
 	  *node->mutex = 0;
 	  prev->bits = node->bits;
@@ -683,13 +721,15 @@ ulong oldvalue;
 
 	// set the leaf offset in the node
 
-	if( !slot->leaf ) {
-		generic = (ARTgeneric *)(Arena + slot->off);
+	if( !node->leaf && node->off ) {
+		generic = (ARTgeneric *)(Arena + node->off);
 		oldvalue = generic->value;
 		generic->value = valueoffset;
 	} else {
-		oldvalue = slot->off;
-		slot->off = valueoffset;
+		oldvalue = node->off;
+		node->off = valueoffset;
+		node->leaf = 1;
+		prev->bits = node->bits;
 	}
 
 	if( lock )
@@ -764,9 +804,10 @@ FILE *in;
 	switch(ch | 0x20)
 	{
 	case '4':	// 4 byte random keys
+		size = atoi(args->infile);
 		memset (buf, 0, sizeof(buf));
 		initstate_r(args->idx * 100 + 100, state, 64, buf);
-		for( line = 0; line < 16000000; line++ ) {
+		for( line = 0; line < size; line++ ) {
 		random_r(buf, next);
 
 			key[0] = next[0];
@@ -776,8 +817,90 @@ FILE *in;
 			key[2] = next[0];
 			next[0] >>= 8;
 			key[3] = next[0];
-			ARTinsert (thread, key, 4, 0);
+			ARTinsert (thread, key, 4, 4);
 		}
+		break;
+
+	case '8':	// 8 byte random keys of random length
+		size = atoi(args->infile);
+		memset (buf, 0, sizeof(buf));
+		initstate_r(args->idx * 100 + 100, state, 64, buf);
+		for( line = 0; line < size; line++ ) {
+		random_r(buf, next);
+
+			key[0] = next[0];
+			next[0] >>= 8;
+			key[1] = next[0];
+			next[0] >>= 8;
+			key[2] = next[0];
+			next[0] >>= 8;
+			key[3] = next[0];
+
+		random_r(buf, next);
+
+			key[4] = next[0];
+			next[0] >>= 8;
+			key[5] = next[0];
+			next[0] >>= 8;
+			key[6] = next[0];
+			next[0] >>= 8;
+			key[7] = next[0];
+
+			if( ARTinsert (thread, key, (line % 8) + 1, 8) )
+				found++;
+		}
+		fprintf(stderr, "finished %s for %d keys, duplicates %d\n", args->infile, line, found);
+		break;
+
+	case 'y':	// 8 byte random keys of random length
+		size = atoi(args->infile);
+		memset (buf, 0, sizeof(buf));
+		initstate_r(args->idx * 100 + 100, state, 64, buf);
+		for( line = 0; line < size; line++ ) {
+		random_r(buf, next);
+
+			key[0] = next[0];
+			next[0] >>= 8;
+			key[1] = next[0];
+			next[0] >>= 8;
+			key[2] = next[0];
+			next[0] >>= 8;
+			key[3] = next[0];
+
+		random_r(buf, next);
+
+			key[4] = next[0];
+			next[0] >>= 8;
+			key[5] = next[0];
+			next[0] >>= 8;
+			key[6] = next[0];
+			next[0] >>= 8;
+			key[7] = next[0];
+
+			if( ARTfindkey (thread, key, line % 8 + 1) )
+				found++;
+		}
+		fprintf(stderr, "finished %s for %d keys, found %d\n", args->infile, line, found);
+		break;
+
+	case 'x':	// find 4 byte random keys
+		size = atoi(args->infile);
+		memset (buf, 0, sizeof(buf));
+		initstate_r(args->idx * 100 + 100, state, 64, buf);
+		for( line = 0; line < size; line++ ) {
+		random_r(buf, next);
+
+			key[0] = next[0];
+			next[0] >>= 8;
+			key[1] = next[0];
+			next[0] >>= 8;
+			key[2] = next[0];
+			next[0] >>= 8;
+			key[3] = next[0];
+			if( ARTfindkey (thread, key, 4) )
+				found++;
+		}
+		fprintf(stderr, "finished %s for %d keys, found %d\n", args->infile, line, found);
 		break;
 
 	case 'd':
@@ -798,10 +921,13 @@ FILE *in;
 			{
 			  line++;
 
-			  offset = art_space (thread, len - 10 + sizeof(ARTval));
-			  val = (ARTval *)(Arena + offset);
-			  memcpy (val->value, key + 10, len - 10);
-			  val->len = len - 10;
+			  if( len > 10 ) {
+			    offset = art_space (thread, len - 10 + sizeof(ARTval));
+			    val = (ARTval *)(Arena + offset);
+			    memcpy (val->value, key + 10, len - 10);
+			    val->len = len - 10;
+			  } else
+				offset = 1;
 
 			  if( ARTinsert (thread, key, 10, offset) )
 				  fprintf(stderr, "Duplicate key source: %d\n", line), exit(0);
@@ -892,7 +1018,7 @@ pthread_t *threads;
 int idx, cnt, err;
 ThreadArg *args;
 float elapsed;
-void *trie;
+ARTtrie *trie;
 int fd;
 
 	if( argc < 3 ) {
@@ -912,14 +1038,16 @@ int fd;
 
 	threads = malloc (cnt * sizeof(pthread_t));
 	args = malloc ((cnt + 1) * sizeof(ThreadArg));
-
+#ifdef PERSIST
 	fd = open ((char*)argv[1], O_RDWR | O_CREAT, 0666);
 
 	if( fd == -1 ) {
 		fprintf (stderr, "Unable to create/open ARTful file %s\n", argv[1]);
 		exit (1);
 	}
-
+#else
+	fd = -1;
+#endif
 	trie = ARTnew(fd);
 
 	//	fire off threads
