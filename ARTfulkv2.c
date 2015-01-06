@@ -23,7 +23,7 @@ typedef unsigned int uint;
 
 enum NodeType {
 	UnusedNode = 0, // node is not yet in use
-	SpanNode,		// node contains key bytes (up to 16) and leaf element
+	SpanNode,		// node contains key bytes (up to 8) and leaf element
 	Array4,			// node contains 4 radix slots & leaf element
 	Array16,		// node contains 16 radix slots & leaf element
 	Array64,		// node contains 64 radix slots & leaf element
@@ -40,11 +40,18 @@ typedef union {
   ulong bits;
 } ARTslot;
 
+//  a node is broken down into two parts:
+//  the node proper and its pointer slot.
+
+//  the first few fields are generic to all nodes:
+
 typedef struct {
 	ulong value:48;		// offset of leaf value that ended before this node
 	uchar type;			// type of ARTful node
 	uchar fill;			// filler
 } ARTgeneric;
+
+//	radix node with four slots and their key bytes:
 
 typedef struct {
 	ulong value:48;		// offset of leaf value that ended before this node
@@ -54,6 +61,8 @@ typedef struct {
 	uchar keys[4];
 } ARTnode4;
 
+//	radix node with sixteen slots and their key bytes:
+
 typedef struct {
 	ulong value:48;		// offset of leaf value that ended before this node
 	uchar type;			// type of ARTful node
@@ -61,6 +70,8 @@ typedef struct {
 	ARTslot radix[16];
 	uchar keys[16];
 } ARTnode16;
+
+//	radix node with sixty-four slots and a 256 key byte array:
 
 typedef struct {
 	ulong value:48;		// offset of leaf value that ended before this node
@@ -70,12 +81,16 @@ typedef struct {
 	uchar keys[256];
 } ARTnode64;
 
+//	radix node all two hundred fifty six slots
+
 typedef struct {
 	ulong value:48;		// offset of leaf value that ended before this node
 	uchar type;			// type of ARTful node
 	uchar fill;			// filler
 	ARTslot radix[256];
 } ARTnode256;
+
+//	Span node containing up to 8 consecutive key bytes
 
 typedef struct {
 	ulong value:48;		// offset of leaf value that ended before this node
@@ -85,11 +100,8 @@ typedef struct {
 	uchar bytes[8];
 } ARTspan;
 
-typedef struct {
-	ulong value:48;		// offset of leaf value that ended before this node
-	uchar type;			// type of ARTful node
-	uchar fill;			// filler
-} ARTleaf;
+//	the ARTful trie containing the root node slot
+//	and the heap storage management.
 
 typedef struct {
 	ARTslot root[1];
@@ -98,16 +110,22 @@ typedef struct {
 	uchar arena_mutex[1];
 } ARTtrie;
 
+//	the ARTful trie value string in the heap
+
 typedef struct {
 	uchar len;			// this can be changed to a ushort or uint
 	uchar value[0];
 } ARTval;
+
+//	the cursor stack element
 
 typedef struct {
 	ARTslot *slot;		// current slot
 	uint off;			// offset within key
 	int idx;			// current index within slot
 } ARTstack;
+
+//	the cursor control
 
 typedef struct {
 	uint maxdepth;		// maximum depth of ARTful trie
@@ -116,12 +134,16 @@ typedef struct {
 	ARTstack stack[0];	// cursor stack
 } ARTcursor;
 
+//	Each thread gets one of these structures
+
 typedef struct {
-	ulong base;			// base of arena assigned to thread
-	ulong offset;		// next offset of chunk to allocate
+	ulong base;			// base of arena chunk assigned to thread
+	ulong offset;		// next offset of this chunk to allocate
 	ARTtrie *trie;		// ARTful trie
 	ARTcursor *cursor;	// thread cursor
 } ARTthread;
+
+//	one byte mutex spin lock
 
 #define relax() asm volatile("pause\n": : : "memory")
 
@@ -146,7 +168,7 @@ ulong ArenaVM = 1024UL * 1024UL*1024UL *12;
 
 ulong ArenaInit = 1024UL*1024UL *100;
 
-uchar *Arena;
+uchar *Arena;		// pointer to base of heap
 int ArenaFd;		// arena file descriptor
 
 //	incremental amount to allocate to threads
@@ -154,9 +176,13 @@ int ArenaFd;		// arena file descriptor
 
 #define ARENA_chunk (1024 * 1024)
 
+//	release unused value heap area
+
 void art_free (ARTtrie *trie, uchar type, void *what)
 {
 }
+
+//	allocate space in the Arena heap
 
 ulong art_space (ARTthread *thread, uint size)
 {
@@ -182,6 +208,8 @@ ulong offset;
 	thread->offset += size;
 	return offset;
 }
+
+//	allocate a new trie node in the Arena heap
 
 ulong art_node (ARTthread *thread, uchar type)
 {
@@ -216,6 +244,8 @@ uint size, xtra;
 	return art_space (thread, size);
 }
 
+//	allocate a new thread cursor object
+
 ARTthread *ARTnewthread (ARTtrie *trie, uint depth)
 {
 ARTcursor *cursor = calloc (1, sizeof(ARTcursor) + depth * sizeof(ARTstack));
@@ -226,6 +256,8 @@ ARTthread *thread = calloc (1, sizeof(ARTthread));
 	thread->trie = trie;
 	return thread;
 }
+
+//	create/open an ARTful trie
 
 ARTtrie *ARTnew (int fd)
 {
@@ -251,6 +283,8 @@ uint i, j;
 	trie->arena_size = offset;
 
 	//	is this a new file?
+	//	if so, fill out the first two levels
+	//	of the trie with radix256 nodes.
 
 	if( !trie->arena_next ) {
 	  trie->arena_next = sizeof(ARTtrie);
@@ -271,6 +305,8 @@ uint i, j;
 //	  		next256->type = Array256;
 //		}
 	  }
+
+	  // round up to complete the first chunks
 
 	  trie->arena_next |= ARENA_chunk - 1;
 	  trie->arena_next++;
@@ -307,7 +343,7 @@ uint ARTprevkey (ARTthread *thread, uchar *key, uint keymax)
 {
 }
 
-//  find key in ARTful trie, returning current value or NULL
+//  find key in ARTful trie, returning its current value or zero
 
 ulong ARTfindkey (ARTthread *thread, uchar *key, uint keylen)
 {
@@ -325,6 +361,8 @@ uchar *chr;
 	slot = thread->trie->root;
 	off = 0;
 
+	//	loop through all the key bytes
+
 	while( off < keylen ) {
 	  if( !slot->leaf && slot->off )
 		generic = (ARTgeneric *)(Arena + slot->off);
@@ -336,7 +374,7 @@ uchar *chr;
 		span = (ARTspan*)(Arena + slot->off);
 		len = keylen - off;
 
-		// would key end in the middle of the span?
+		// would the key end in the middle of the span?
 
 		if( len < slot->nslot )
 			return 0;
@@ -380,6 +418,8 @@ uchar *chr;
 	  case Array64:
 		radix64 = (ARTnode64 *)(Arena + slot->off);
 		idx = radix64->keys[key[off++]];
+
+		// is the key byte assigned to a radix node?
 
 		if( idx == 0xff )
 		  return 0;
@@ -480,7 +520,7 @@ ulong oldvalue;
 		  continue;
 		}
 
-		// copy prefix bytes to a new span node
+		// copy matching prefix bytes to a new span node
 
 		if( idx ) {
 		  span1 = (ARTspan *)(Arena + art_node(thread, SpanNode));
@@ -492,17 +532,19 @@ ulong oldvalue;
 		  node->nslot = idx;
 		}
 
-		// else cut span from the tree by transforming
+		// else cut the span node from the tree by transforming
 		// the original node into a radix4 or span node
 
 		else
 		  slot = node;
 
-		// place a radix node in after span1 and before span2
+		// place a radix node after span1 and before span2
 		// if needed for additional key byte(s)
 
 		if( off < keylen ) {
 		  radix4 = (ARTnode4 *)(Arena + art_node(thread, Array4));
+
+		  // are we the first new node?
 
 		  if( !idx )
 			radix4->value = span->value;
@@ -531,31 +573,34 @@ ulong oldvalue;
 		  *slot = *span->next;
 
 		//  does key stop at radix/span node?
-		//	if so, fill in span2->value below
 
 		if( off == keylen )
 		  break; 
 
-		slot = radix4->radix + 1;	// second radix element
+		//  fill in second radix element
+		//	then fill in rest of the key in span nodes below
+
 		radix4->keys[1] = key[off++];
+		slot = radix4->radix + 1;
 		break;
 
 	  case Array4:
 		radix4 = (ARTnode4*)(Arena + node->off);
+		max = node->nslot;
 
-		for( idx = 0; idx < node->nslot; idx++ )
+		for( idx = 0; idx < max; idx++ )
 		  if( key[off] == radix4->keys[idx] )
 			break;
 
-		if( idx < node->nslot ) {
+		if( idx < max ) {
 		  slot = radix4->radix + idx;
 		  off++;
 		  continue;
 		}
 
-		// add to radix node if room
+		// add to radix4 node if room
 
-		if( node->nslot < 4 ) {
+		if( max < 4 ) {
 		  radix4->keys[node->nslot] = key[off++];
 		  slot = radix4->radix + node->nslot++;
 		  break;
@@ -566,14 +611,16 @@ ulong oldvalue;
 
 		radix16 = (ARTnode16 *)(Arena + art_node(thread, Array16));
 
-		for( idx = 0; idx < node->nslot; idx++ ) {
+		for( idx = 0; idx < max; idx++ ) {
 		  radix16->radix[idx] = radix4->radix[idx];
 		  radix16->keys[idx] = radix4->keys[idx];
 		}
 
-		radix16->keys[node->nslot] = key[off++];
+		radix16->keys[max] = key[off++];
 		radix16->value = radix4->value;
 		radix16->type = Array16;
+
+		//	fill in rest of the key in span nodes below
 
 		node->off = (uchar *)radix16 - Arena;
 		slot = radix16->radix + node->nslot++;
@@ -581,10 +628,11 @@ ulong oldvalue;
 
 	  case Array16:
 		radix16 = (ARTnode16*)(Arena + node->off);
+		max = node->nslot;
 
-		// is key byte in radix node?
+		// is key byte in this radix node?
 
-		if( chr = memchr (radix16->keys, key[off], node->nslot) ) {
+		if( chr = memchr (radix16->keys, key[off], max) ) {
 		  idx = chr - radix16->keys;
 		  slot = radix16->radix + idx;
 		  off++;
@@ -593,28 +641,32 @@ ulong oldvalue;
 
 		// add to radix node if room
 
-		if( node->nslot < 16 ) {
-		  radix16->keys[node->nslot] = key[off++];
+		if( max < 16 ) {
+		  radix16->keys[max] = key[off++];
 		  slot = radix16->radix + node->nslot++;
 		  break;
 		}
 
 		// the radix node is full, promote to
-		// the next larger size.
+		// the next larger size. mark all the
+		// keys as currently unused.
 
 		radix64 = (ARTnode64 *)(Arena + art_node(thread, Array64));
 		memset (radix64->keys, 0xff, sizeof(radix64->keys));
 
-		for( idx = 0; idx < node->nslot; idx++ ) {
+		for( idx = 0; idx < max; idx++ ) {
 		  slot = radix16->radix + idx;
 		  radix64->radix[idx] = *slot;
 		  radix64->keys[radix16->keys[idx]] = idx;
 		}
 
 		node->off = (uchar *)radix64 - Arena;
-		radix64->keys[key[off++]] = node->nslot;
+		radix64->keys[key[off++]] = max;
 		radix64->value = radix16->value;
 		radix64->type = Array64;
+
+		//	fill in rest of the key bytes into
+		//	span nodes below.
 
 		slot = radix64->radix + node->nslot++;
 		break;
@@ -656,6 +708,9 @@ ulong oldvalue;
 		radix256->value = radix64->value;
 		radix256->type = Array256;
 
+		//	fill in the rest of the key bytes
+		//	into Span nodes below
+
 		slot = radix256->radix + key[off++];
 		break;
 
@@ -672,7 +727,7 @@ ulong oldvalue;
 		break;
 	  }
 
-	  // fill in empty/leaf slot with remaining key bytes
+	  // fill in an empty slot with remaining key bytes
 
 	  if( node->leaf )
 		oldvalue = node->off;
