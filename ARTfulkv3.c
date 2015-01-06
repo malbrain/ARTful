@@ -855,7 +855,7 @@ FILE *in;
 			if( ARTinsert (thread, key, 4, 8) )
 				found++;
 		}
-		fprintf(stderr, "finished %s for %d keys, duplicates %d\n", args->infile, line, found);
+		fprintf(stderr, "finished inserting %d keys, duplicates %d\n", line, found);
 		break;
 
 	case '8':	// 8 byte random keys of random length
@@ -886,7 +886,7 @@ FILE *in;
 			if( ARTinsert (thread, key, (line % 8) + 1, 8) )
 				found++;
 		}
-		fprintf(stderr, "finished %s for %d keys, duplicates %d\n", args->infile, line, found);
+		fprintf(stderr, "finished inserting %d keys, duplicates %d\n", line, found);
 		break;
 
 	case 'y':	// 8 byte random keys of random length
@@ -917,7 +917,7 @@ FILE *in;
 			if( ARTfindkey (thread, key, line % 8 + 1) )
 				found++;
 		}
-		fprintf(stderr, "finished %s for %d keys, found %d\n", args->infile, line, found);
+		fprintf(stderr, "finished searching %d keys, found %d\n", line, found);
 		break;
 
 	case 'x':	// find 4 byte random keys
@@ -937,7 +937,7 @@ FILE *in;
 			if( ARTfindkey (thread, key, 4) )
 				found++;
 		}
-		fprintf(stderr, "finished %s for %d keys, found %d\n", args->infile, line, found);
+		fprintf(stderr, "finished searching %d keys, found %d\n", line, found);
 		break;
 
 	case 'd':
@@ -1125,7 +1125,7 @@ int fd, run;
 	 fprintf(stderr, " sys  %dm%.3fs\n", (int)(elapsed/60), elapsed - (int)(elapsed/60)*60);
 	}
 
-	fprintf(stderr, " Total memory used %d MB\n", trie->arena_size/1000000);
+	fprintf(stderr, " Total memory used %d MB\n", trie->arena_next/1000000);
 	ARTclose (trie);
 
 }
