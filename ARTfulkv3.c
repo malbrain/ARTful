@@ -24,7 +24,7 @@ typedef unsigned int uint;
 enum NodeType {
 	UnusedNode = 0, // node is not yet in use
 	SpanNode,		// node contains key bytes (up to 8) and leaf element
-	SpanLeaf,		// node slot contains leaf offset
+	LeafSlot,		// node slot contains leaf offset
 	Array4,			// node contains 4 radix slots & leaf element
 	Array16,		// node contains 16 radix slots & leaf element
 	Array64,		// node contains 64 radix slots & leaf element
@@ -310,6 +310,12 @@ uint i, j;
 	return trie;
 }
 
+void ARTclosethread (ARTthread *thread)
+{
+	free (thread->cursor);
+	free (thread);
+}
+
 void ARTclose (ARTtrie *trie)
 {
 }
@@ -360,7 +366,7 @@ uchar *chr;
 
 	while( off < keylen )
 	  switch( slot->type ) {
-	  case SpanLeaf:
+	  case LeafSlot:
 		return 0;
 
 	  case SpanNode:
@@ -436,7 +442,7 @@ uchar *chr;
 
 ulong ARTinsert (ARTthread *thread, uchar *key, uint keylen, ulong valueoffset)
 {
-ARTslot *prev, node[1], *lock, *slot, past[1];
+ARTslot *prev, node[1], *lock, *slot;
 ARTspan *span, *span1, *span2;
 uint len, idx, max, off;
 uchar slot64, *update64;
@@ -453,7 +459,6 @@ ulong oldvalue;
 	off = 0;
 
 	while( 1 ) {
-	  past->bits = node->bits;
 	  node->bits = slot->bits;
 	  type = node->type;
 
@@ -708,7 +713,7 @@ ulong oldvalue;
 		slot = node;
 		break;
 
-	  case SpanLeaf:
+	  case LeafSlot:
 		oldvalue = node->off * 8;
 		slot = node;
 		break;
@@ -734,12 +739,12 @@ ulong oldvalue;
 		off += len;
 	  }
 
-	  if( slot->off && slot->type != SpanLeaf ) {
+	  if( slot->off && slot->type != LeafSlot ) {
 		generic = (ARTgeneric *)(Arena + slot->off * 8);
 		generic->value = valueoffset;
 	  } else {
 		slot->off = valueoffset >> 3;
-		slot->type = SpanLeaf;
+		slot->type = LeafSlot;
 	  }
 
 	  *node->mutex = 0;
@@ -756,14 +761,14 @@ ulong oldvalue;
 
 	// set the leaf offset in the node
 
-	if( node->off && node->type != SpanLeaf ) {
+	if( node->off && node->type != LeafSlot ) {
 		generic = (ARTgeneric *)(Arena + node->off * 8);
 		oldvalue = generic->value;
 		generic->value = valueoffset;
 	} else {
 		oldvalue = node->off * 8;
 		node->off = valueoffset >> 3;
-		node->type = SpanLeaf;
+		node->type = LeafSlot;
 		prev->bits = node->bits;
 	}
 
@@ -801,7 +806,7 @@ struct timeval tv[1];
 
 typedef struct {
 	char idx;
-	char *type;
+	char type;
 	char *infile;
 	ARTtrie *trie;
 } ThreadArg;
@@ -815,28 +820,23 @@ typedef struct {
 void *index_file (void *arg)
 {
 int line = 0, found = 0, cnt = 0, cachecnt, idx;
-int ch, len = 0, slot, type = 0;
 unsigned char key[ARTmaxkey];
+int len = 0, slot, type = 0;
 struct random_data buf[1];
 ThreadArg *args = arg;
 ARTthread *thread;
 uint counts[8][2];
 uchar state[64];
+int vallen, ch;
 uint next[1];
 ulong offset;
-int vallen;
 ARTval *val;
 uint size;
 FILE *in;
 
-	if( args->idx < strlen (args->type) )
-		ch = args->type[args->idx];
-	else
-		ch = args->type[strlen(args->type) - 1];
-
 	thread = ARTnewthread(args->trie, ARTdepth);
 
-	switch(ch | 0x20)
+	switch(args->type | 0x20)
 	{
 	case '4':	// 4 byte random keys
 		size = atoi(args->infile);
@@ -852,8 +852,10 @@ FILE *in;
 			key[2] = next[0];
 			next[0] >>= 8;
 			key[3] = next[0];
-			ARTinsert (thread, key, 4, 8);
+			if( ARTinsert (thread, key, 4, 8) )
+				found++;
 		}
+		fprintf(stderr, "finished %s for %d keys, duplicates %d\n", args->infile, line, found);
 		break;
 
 	case '8':	// 8 byte random keys of random length
@@ -1041,6 +1043,7 @@ FILE *in;
 		break;
 	}
 
+	ARTclosethread (thread);
 	return NULL;
 }
 
@@ -1048,23 +1051,21 @@ typedef struct timeval timer;
 
 int main (int argc, char **argv)
 {
-double start, stop;
 pthread_t *threads;
 int idx, cnt, err;
 ThreadArg *args;
+double start[3];
 float elapsed;
 ARTtrie *trie;
-int fd;
+int fd, run;
 
 	if( argc < 3 ) {
 		fprintf (stderr, "Usage: %s idx_file cmds src_file1 src_file2 ... ]\n", argv[0]);
 		fprintf (stderr, "  where idx_file is the name of the ARTful tree file\n");
-		fprintf (stderr, "  cmds is a string of (r)ev scan/(w)rite/(s)can/(d)elete/(f)ind/(p)ennysort/(c)ount/(m)ainflush/(a)udit, with a one character command for each input src_file. A command can also be given with no input file\n");
+		fprintf (stderr, "  cmds is a string of (r)ev scan/(w)rite/(s)can/(d)elete/(f)ind/(p)ennysort/(c)ount/(4)bit random keys, with the commands executed in sequence across the input files\n");
 		fprintf (stderr, "  src_file1 thru src_filen are files of keys or pennysort records separated by newline\n");
 		exit(0);
 	}
-
-	start = getCpuTime(0);
 
 	if( argc > 3 )
 		cnt = argc - 3;
@@ -1085,21 +1086,26 @@ int fd;
 #endif
 	trie = ARTnew(fd);
 
-	//	fire off threads
+	//	fire off threads for each command
 
-	if( cnt > 1 )
+	for( run = 0; run < strlen(argv[2]); run++ ) {
+	 start[0] = getCpuTime(0);
+	 start[1] = getCpuTime(1);
+	 start[2] = getCpuTime(2);
+
+	 if( cnt > 1 )
 	  for( idx = 0; idx < cnt; idx++ ) {
 		args[idx].infile = argv[idx + 3];
-		args[idx].type = argv[2];
+		args[idx].type = argv[2][run];
 		args[idx].trie = trie;
 		args[idx].idx = idx;
 
 		if( err = pthread_create (threads + idx, NULL, index_file, args + idx) )
 			fprintf(stderr, "Error creating thread %d\n", err);
 	  }
-	else {
+	 else {
 		args[0].infile = argv[3];
-		args[0].type = argv[2];
+		args[0].type = argv[2][run];
 		args[0].trie = trie;
 		args[0].idx = 0;
 		index_file (args);
@@ -1107,17 +1113,20 @@ int fd;
 
 	// 	wait for termination
 
-	if( cnt > 1 )
+	 if( cnt > 1 )
 	  for( idx = 0; idx < cnt; idx++ )
 		pthread_join (threads[idx], NULL);
 
+	 elapsed = getCpuTime(0) - start[0];
+	 fprintf(stderr, " real %dm%.3fs\n", (int)(elapsed/60), elapsed - (int)(elapsed/60)*60);
+	 elapsed = getCpuTime(1) - start[1];
+	 fprintf(stderr, " user %dm%.3fs\n", (int)(elapsed/60), elapsed - (int)(elapsed/60)*60);
+	 elapsed = getCpuTime(2) - start[2];
+	 fprintf(stderr, " sys  %dm%.3fs\n", (int)(elapsed/60), elapsed - (int)(elapsed/60)*60);
+	}
+
+	fprintf(stderr, " Total memory used %d MB\n", trie->arena_size/1000000);
 	ARTclose (trie);
 
-	elapsed = getCpuTime(0) - start;
-	fprintf(stderr, " real %dm%.3fs\n", (int)(elapsed/60), elapsed - (int)(elapsed/60)*60);
-	elapsed = getCpuTime(1);
-	fprintf(stderr, " user %dm%.3fs\n", (int)(elapsed/60), elapsed - (int)(elapsed/60)*60);
-	elapsed = getCpuTime(2);
-	fprintf(stderr, " sys  %dm%.3fs\n", (int)(elapsed/60), elapsed - (int)(elapsed/60)*60);
 }
 #endif	//STANDALONE
