@@ -184,6 +184,9 @@ ulong art_space (ARTthread *thread, uint size)
 ulong offset;
 uint xtra;
 
+	if( xtra = size & 0x7 )
+		size += 8 - xtra;
+
 	if( xtra = thread->offset & 0x7 )
 		thread->offset += 8 - xtra;
 
@@ -212,7 +215,7 @@ uint xtra;
 
 ulong art_node (ARTthread *thread, uchar type)
 {
-uint size, xtra;
+uint size;
 
 	switch( type ) {
 	case SpanNode:
@@ -233,9 +236,6 @@ uint size, xtra;
 	default:
 	  abort();
 	}
-
-	if( xtra = size & 0x7 )
-		size += 8 - xtra;
 
 	return art_space (thread, size);
 }
@@ -455,6 +455,7 @@ uchar *chr, type;
 ulong oldvalue;
 
 	slot = thread->trie->root;
+	oldvalue = 0;
 	lock = NULL;
 	off = 0;
 
@@ -709,7 +710,6 @@ ulong oldvalue;
 		// will continue here on an empty slot
 
 	  case UnusedNode:
-		oldvalue = 0;
 		slot = node;
 		break;
 
@@ -972,7 +972,7 @@ FILE *in;
 			  continue;
 			}
 
-		    else if( len < ARTmaxkey )
+		    else if( len < ARTmaxkey && ch != '\r' )
 			  key[len++] = ch;
 		fprintf(stderr, "finished %s for %d keys\n", args->infile, line);
 		break;
@@ -988,7 +988,7 @@ FILE *in;
 			  ARTinsert (thread, key, len, 8);
 			  len = 0;
 			}
-			else if( len < ARTmaxkey )
+			else if( len < ARTmaxkey && ch != '\r' )
 				key[len++] = ch;
 
 		fprintf(stderr, "finished %s for %d keys\n", args->infile, line);
