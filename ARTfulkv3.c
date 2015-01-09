@@ -563,8 +563,8 @@ ulong oldvalue;
 		if( off == keylen )
 		  break; 
 
-		//  fill in second radix element
-		//	then fill in rest of the key in span nodes below
+		//  if not, fill in the second radix element
+		//	and the rest of the key in span nodes below
 
 		radix4->keys[1] = key[off++];
 		slot = radix4->radix + 1;
@@ -778,6 +778,223 @@ ulong oldvalue;
 	return oldvalue;
 }
 
+//  scan the keys stored in the ARTtrie
+
+typedef union {
+	ARTspan *span;
+	ARTnode4 *radix4;
+	ARTnode16 *radix16;
+	ARTnode64 *radix64;
+	ARTnode256 *radix256;
+} ARTfan;
+
+ulong ARTscan (uchar *key, uint off, uint max, ARTslot *slot)
+{
+ulong children = 0;
+ARTfan node[1];
+ARTval *val;
+uint i, j;
+uint nxt;
+uint idx;
+int last;
+
+	switch( slot->type ) {
+	case SpanNode:
+		node->span = (ARTspan *)(Arena + slot->off * 8);
+
+		if( node->span->value ) {
+		  fwrite (key, off, 1, stdout);
+		  val = (ARTval *)(Arena + node->span->value * 8);
+		  fwrite (val->value, val->len, 1, stdout);
+		  fputc ('\n', stdout);
+		  children++;
+		}
+
+		memcpy (key + off, node->span->bytes, slot->nslot);
+		off += slot->nslot;
+
+		children += ARTscan (key, off, max, node->span->next);
+		return children;
+
+	case LeafSlot:	
+		fwrite (key, off, 1, stdout);
+		val = (ARTval *)(Arena + slot->off * 8);
+		fwrite (val->value, val->len, 1, stdout);
+		fputc ('\n', stdout);
+		return 1;
+
+	case Array4:
+		node->radix4 = (ARTnode4 *)(Arena + slot->off * 8);
+
+		if( node->radix4->value ) {
+		  fwrite (key, off, 1, stdout);
+		  val = (ARTval *)(Arena + node->radix4->value * 8);
+		  fwrite (val->value, val->len, 1, stdout);
+		  fputc ('\n', stdout);
+		  children++;
+		}
+
+		nxt = 0x100;
+		last = -1;
+
+		for( idx = 0; idx < slot->nslot; idx++ ) {
+		  for( i = 0; i < slot->nslot; i++ )
+			if( node->radix4->keys[i] > last )
+			  if( node->radix4->keys[i] < nxt )
+				nxt = node->radix4->keys[i], j = i;
+
+		  key[off] = nxt;
+		  children += ARTscan (key, off + 1, max, node->radix4->radix + j);
+		  last = nxt;
+		  nxt = 0x100;
+		}
+		
+		return children;
+
+	case Array16:
+		node->radix16 = (ARTnode16 *)(Arena + slot->off * 8);
+
+		if( node->radix16->value ) {
+		  fwrite (key, off, 1, stdout);
+		  val = (ARTval *)(Arena + node->radix16->value * 8);
+		  fwrite (val->value, val->len, 1, stdout);
+		  fputc ('\n', stdout);
+		  children++;
+		}
+
+		nxt = 0x100;
+		last = -1;
+
+		for( idx = 0; idx < slot->nslot; idx++ ) {
+		  for( i = 0; i < slot->nslot; i++ )
+			if( node->radix16->keys[i] > last )
+			  if( node->radix16->keys[i] < nxt )
+				nxt = node->radix16->keys[i], j = i;
+
+		  key[off] = nxt;
+		  children += ARTscan (key, off + 1, max, node->radix16->radix + j);
+		  last = nxt;
+		  nxt = 0x100;
+		}
+		
+		return children;
+
+	case Array64:
+		node->radix64 = (ARTnode64 *)(Arena + slot->off * 8);
+
+		if( node->radix64->value ) {
+		  fwrite (key, off, 1, stdout);
+		  val = (ARTval *)(Arena + node->radix64->value * 8);
+		  fwrite (val->value, val->len, 1, stdout);
+		  fputc ('\n', stdout);
+		  children++;
+		}
+
+		for( idx = 0; idx < 256; idx++ ) {
+		  j = node->radix64->keys[idx];
+		  if( j < 0xff ) {
+			key[off] = idx;
+			children += ARTscan (key, off + 1, max, node->radix64->radix + j);
+		  }
+		}
+		
+		return children;
+
+	case Array256:
+		node->radix256 = (ARTnode256 *)(Arena + slot->off * 8);
+
+		if( node->radix256->value ) {
+		  fwrite (key, off, 1, stdout);
+		  val = (ARTval *)(Arena + node->radix256->value * 8);
+		  fwrite (val->value, val->len, 1, stdout);
+		  fputc ('\n', stdout);
+		  children++;
+		}
+
+		for( idx = 0; idx < 256; idx++ ) {
+		  key[off] = idx;
+		  children += ARTscan (key, off + 1, max, node->radix64->radix + idx);
+		}
+
+		return children;
+	}
+
+	return 0;
+}
+
+//  count the number of keys stored in the ARTtrie
+
+ulong ARTcount (ARTslot *slot)
+{
+ulong children;
+ARTfan node[1];
+uint idx;
+
+	switch( slot->type ) {
+	case SpanNode:
+		node->span = (ARTspan *)(Arena + slot->off * 8);
+		children = ARTcount (node->span->next);
+
+		if( node->span->value )
+			children++;
+
+		return children;
+
+	case LeafSlot:	
+		return slot->off ? 1 : 0;
+
+	case Array4:
+		node->radix4 = (ARTnode4 *)(Arena + slot->off * 8);
+		children = 0;
+
+		for( idx = 0; idx < slot->nslot; idx++ )
+			children += ARTcount (node->radix4->radix + idx);
+		
+		if( node->radix4->value )
+			children++;
+
+		return children;
+
+	case Array16:
+		node->radix16 = (ARTnode16 *)(Arena + slot->off * 8);
+		children = 0;
+
+		for( idx = 0; idx < slot->nslot; idx++ )
+			children += ARTcount (node->radix16->radix + idx);
+		
+		if( node->radix16->value )
+			children++;
+
+		return children;
+
+	case Array64:
+		node->radix64 = (ARTnode64 *)(Arena + slot->off * 8);
+		children = 0;
+
+		for( idx = 0; idx < slot->nslot; idx++ )
+			children += ARTcount (node->radix64->radix + idx);
+		
+		if( node->radix64->value )
+			children++;
+
+		return children;
+
+	case Array256:
+		node->radix256 = (ARTnode256 *)(Arena + slot->off * 8);
+		children = 0;
+
+		for( idx = 0; idx < 256; idx++ )
+			children += ARTcount (node->radix256->radix + idx);
+		
+		if( node->radix256->value )
+			children++;
+
+		return children;
+	}
+
+	return 0;
+}
+
 #ifdef STANDALONE
 #include <time.h>
 #include <sys/resource.h>
@@ -819,17 +1036,16 @@ typedef struct {
 
 void *index_file (void *arg)
 {
-int line = 0, found = 0, cnt = 0, cachecnt, idx;
+int line = 0, cnt = 0, cachecnt, idx;
 unsigned char key[ARTmaxkey];
 int len = 0, slot, type = 0;
 struct random_data buf[1];
+ulong offset, found = 0;
 ThreadArg *args = arg;
 ARTthread *thread;
-uint counts[8][2];
 uchar state[64];
 int vallen, ch;
 uint next[1];
-ulong offset;
 ARTval *val;
 uint size;
 FILE *in;
@@ -838,6 +1054,11 @@ FILE *in;
 
 	switch(args->type | 0x20)
 	{
+	case 'c':	// count keys
+		found = ARTcount (args->trie->root);
+		fprintf(stderr, "finished counting, found %ld keys\n", found);
+		break;
+
 	case '4':	// 4 byte random keys
 		size = atoi(args->infile);
 		memset (buf, 0, sizeof(buf));
@@ -855,7 +1076,7 @@ FILE *in;
 			if( ARTinsert (thread, key, 4, 8) )
 				found++;
 		}
-		fprintf(stderr, "finished inserting %d keys, duplicates %d\n", line, found);
+		fprintf(stderr, "finished inserting %d keys, duplicates %ld\n", line, found);
 		break;
 
 	case '8':	// 8 byte random keys of random length
@@ -886,7 +1107,7 @@ FILE *in;
 			if( ARTinsert (thread, key, (line % 8) + 1, 8) )
 				found++;
 		}
-		fprintf(stderr, "finished inserting %d keys, duplicates %d\n", line, found);
+		fprintf(stderr, "finished inserting %d keys, duplicates %ld\n", line, found);
 		break;
 
 	case 'y':	// 8 byte random keys of random length
@@ -917,7 +1138,7 @@ FILE *in;
 			if( ARTfindkey (thread, key, line % 8 + 1) )
 				found++;
 		}
-		fprintf(stderr, "finished searching %d keys, found %d\n", line, found);
+		fprintf(stderr, "finished searching %d keys, found %ld\n", line, found);
 		break;
 
 	case 'x':	// find 4 byte random keys
@@ -937,7 +1158,7 @@ FILE *in;
 			if( ARTfindkey (thread, key, 4) )
 				found++;
 		}
-		fprintf(stderr, "finished searching %d keys, found %d\n", line, found);
+		fprintf(stderr, "finished searching %d keys, found %ld\n", line, found);
 		break;
 
 	case 'd':
@@ -1007,23 +1228,14 @@ FILE *in;
 			}
 			else if( len < ARTmaxkey )
 				key[len++] = ch;
-		fprintf(stderr, "finished %s for %d keys, found %d\n", args->infile, line, found);
+		fprintf(stderr, "finished %s for %d keys, found %ld\n", args->infile, line, found);
 		break;
 
 	case 's':
 		fprintf(stderr, "started forward scan\n");
-		ARTstartkey (thread, NULL, 0);
+		cnt = ARTscan (key, 0, sizeof(key), thread->trie->root);
 
-		while( len = ARTnextkey (thread, key, ARTmaxkey) ) {
-		  fwrite (key, len, 1, stdout);
-		  val = thread->cursor->value;
-		  if( val->len )
-			fwrite (val->value, val->len, 1, stdout);
-		  fputc ('\n', stdout);
-		  cnt++;
-	    }
-
-		fprintf(stderr, " Total keys read %d\n", cnt);
+		fprintf(stderr, " Total keys scanned %d\n", cnt);
 		break;
 
 	case 'r':
