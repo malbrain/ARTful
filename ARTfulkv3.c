@@ -339,9 +339,9 @@ uint ARTprevkey (ARTthread *thread, uchar *key, uint keymax)
 {
 }
 
-//  find key in ARTful trie, returning its current value or zero
+//  find key in ARTful trie, returning its value slot address or zero
 
-ulong ARTfindkey (ARTthread *thread, uchar *key, uint keylen)
+ARTslot *ARTfindkey (ARTthread *thread, uchar *key, uint keylen)
 {
 uint len, idx, off;
 ARTnode4 *radix4;
@@ -349,7 +349,6 @@ ARTnode16 *radix16;
 ARTnode64 *radix64;
 ARTnode256 *radix256;
 ARTgeneric *generic;
-ulong oldvalue;
 ARTslot *slot;
 ARTspan *span;
 uchar *chr;
@@ -362,10 +361,10 @@ uchar *chr;
 	while( off < keylen )
 	  switch( slot->type ) {
 	  case ValueSlot:
-		return 0;
+		return NULL;
 
 	  case LeafSlot:
-		return 0;
+		return NULL;
 
 	  case SpanNode:
 		span = (ARTspan*)(Arena + slot->off * 8);
@@ -374,10 +373,10 @@ uchar *chr;
 		// would the key end in the middle of the span?
 
 		if( len < slot->nslot )
-			return 0;
+			return NULL;
 
 		if( memcmp (key + off, span->bytes, slot->nslot) )
-			return 0;
+			return NULL;
 
 		off += slot->nslot;
 		slot = span->next;
@@ -392,7 +391,7 @@ uchar *chr;
 			break;
 
 		if( idx == len )
-		  return 0;
+		  return NULL;
 
 		slot = radix4->radix + idx;
 		off++;
@@ -410,7 +409,7 @@ uchar *chr;
 		  continue;
 		}
 
-		return 0;
+		return NULL;
 
 	  case Array64:
 		radix64 = (ARTnode64 *)(Arena + slot->off * 8);
@@ -419,7 +418,7 @@ uchar *chr;
 		// is the key byte assigned to a radix node?
 
 		if( idx == 0xff )
-		  return 0;
+		  return NULL;
 
 		slot = radix64->radix + idx;
 		continue;
@@ -430,10 +429,21 @@ uchar *chr;
 		continue;
 
 	  case UnusedNode:
-		return 0;
+		return NULL;
 	  }
 
-	return slot->off * 8;
+	if( slot->type > ValueSlot ) {
+	  generic = (ARTgeneric *)(Arena + slot->off * 8);
+	  if( generic->value->type )
+		return generic->value;
+	  else
+		return NULL;
+	}
+
+	if( slot->type )
+	  return slot;
+
+	return NULL;
 }
 
 //	insert key/value into ARTful trie, returning pointer to value slot.
@@ -971,8 +981,11 @@ uint idx;
 
 		return children;
 
+	case ValueSlot:	
+		return 1;
+
 	case LeafSlot:	
-		return slot->off ? 1 : 0;
+		return slot->off;
 
 	case Array4:
 		node->radix4 = (ARTnode4 *)(Arena + slot->off * 8);
@@ -1110,6 +1123,7 @@ FILE *in;
 		size = atoi(args->infile);
 		memset (buf, 0, sizeof(buf));
 		initstate_r(args->idx * 100 + 100, state, 64, buf);
+
 		for( line = 0; line < size; line++ ) {
 			random_r(buf, next);
 			key[0] = next[0];
@@ -1119,6 +1133,7 @@ FILE *in;
 			key[2] = next[0];
 			next[0] >>= 8;
 			key[3] = next[0];
+
 			slot = ARTinsert (thread, key, 4);
 			slot->type = LeafSlot;
 
@@ -1128,6 +1143,7 @@ FILE *in;
 			slot->off++;
 			mutexrelease (slot->mutex);
 		}
+
 		fprintf(stderr, "finished inserting %d keys, duplicates %ld\n", line, found);
 		break;
 
@@ -1135,8 +1151,9 @@ FILE *in;
 		size = atoi(args->infile);
 		memset (buf, 0, sizeof(buf));
 		initstate_r(args->idx * 100 + 100, state, 64, buf);
+
 		for( line = 0; line < size; line++ ) {
-		random_r(buf, next);
+			random_r(buf, next);
 
 			key[0] = next[0];
 			next[0] >>= 8;
@@ -1146,7 +1163,7 @@ FILE *in;
 			next[0] >>= 8;
 			key[3] = next[0];
 
-		random_r(buf, next);
+			random_r(buf, next);
 
 			key[4] = next[0];
 			next[0] >>= 8;
@@ -1165,6 +1182,7 @@ FILE *in;
 			slot->off++;
 			mutexrelease (slot->mutex);
 		}
+
 		fprintf(stderr, "finished inserting %d keys, duplicates %ld\n", line, found);
 		break;
 
@@ -1172,8 +1190,9 @@ FILE *in;
 		size = atoi(args->infile);
 		memset (buf, 0, sizeof(buf));
 		initstate_r(args->idx * 100 + 100, state, 64, buf);
+
 		for( line = 0; line < size; line++ ) {
-		random_r(buf, next);
+			random_r(buf, next);
 
 			key[0] = next[0];
 			next[0] >>= 8;
@@ -1183,7 +1202,7 @@ FILE *in;
 			next[0] >>= 8;
 			key[3] = next[0];
 
-		random_r(buf, next);
+			random_r(buf, next);
 
 			key[4] = next[0];
 			next[0] >>= 8;
@@ -1193,9 +1212,10 @@ FILE *in;
 			next[0] >>= 8;
 			key[7] = next[0];
 
-			if( ARTfindkey (thread, key, line % 8 + 1) )
+			if( slot = ARTfindkey (thread, key, line % 8 + 1) )
 				found++;
 		}
+
 		fprintf(stderr, "finished searching %d keys, found %ld\n", line, found);
 		break;
 
@@ -1203,8 +1223,9 @@ FILE *in;
 		size = atoi(args->infile);
 		memset (buf, 0, sizeof(buf));
 		initstate_r(args->idx * 100 + 100, state, 64, buf);
+
 		for( line = 0; line < size; line++ ) {
-		random_r(buf, next);
+			random_r(buf, next);
 
 			key[0] = next[0];
 			next[0] >>= 8;
@@ -1213,9 +1234,11 @@ FILE *in;
 			key[2] = next[0];
 			next[0] >>= 8;
 			key[3] = next[0];
-			if( ARTfindkey (thread, key, 4) )
+
+			if( slot = ARTfindkey (thread, key, 4) )
 				found++;
 		}
+
 		fprintf(stderr, "finished searching %d keys, found %ld\n", line, found);
 		break;
 
@@ -1255,8 +1278,9 @@ FILE *in;
 			  continue;
 			}
 
-		    else if( len < ARTmaxkey && ch != '\r' )
+		    else if( len < ARTmaxkey )
 			  key[len++] = ch;
+
 		fprintf(stderr, "finished %s for %d keys\n", args->infile, line);
 		break;
 
@@ -1274,7 +1298,7 @@ FILE *in;
 			  mutexrelease (slot->mutex);
 			  len = 0;
 			}
-			else if( len < ARTmaxkey && ch != '\r' )
+			else if( len < ARTmaxkey )
 				key[len++] = ch;
 
 		fprintf(stderr, "finished %s for %d keys\n", args->infile, line);
@@ -1287,18 +1311,22 @@ FILE *in;
 			if( ch == '\n' )
 			{
 			  line++;
-			  if( ARTfindkey (thread, key, len) )
+
+			  if( slot = ARTfindkey (thread, key, len) )
 				found++;
+
 			  len = 0;
 			}
 			else if( len < ARTmaxkey )
 				key[len++] = ch;
+
 		fprintf(stderr, "finished %s for %d keys, found %ld\n", args->infile, line, found);
 		break;
 
 	case 's':
 		if( args->idx )
 			break;
+
 		fprintf(stderr, "started forward scan\n");
 		cnt = ARTscan (key, 0, sizeof(key), thread->trie->root);
 
@@ -1312,8 +1340,10 @@ FILE *in;
 		while( len = ARTprevkey (thread, key, ARTmaxkey) ) {
 		  fwrite (key, len, 1, stdout);
 		  val = thread->cursor->value;
+
 		  if( val->len )
 			fwrite (val->value, val->len, 1, stdout);
+
 		  fputc ('\n', stdout);
 		  cnt++;
 	    }

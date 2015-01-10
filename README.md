@@ -20,5 +20,5 @@ To time 16M inserts and finds of 4 byte random keys with 4 threads:
 To time sorting and subsequent listing of 10 byte key pennysort file segments:
 ./ARTfulkv3 xyz ps pennysort*
 
-To time sorting and subsequent listing of an arbitrary file:
-./ARTfulkv3 xyz ws filex
+To time sorting and subsequent listing of two arbitrary files:
+./ARTfulkv3 xyz ws file1 file2
