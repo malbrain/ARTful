@@ -771,8 +771,7 @@ uchar *chr, type;
 
 	  if( lock && lock != prev && lock != retvalue )
 		mutexrelease (lock->mutex);
-if( retvalue->type > 2 )
-abort();
+
 	  return retvalue;
 	}
 
@@ -784,8 +783,6 @@ abort();
 	} else
 		retvalue = slot;
 
-if( retvalue->type > 2 )
-abort();
 	if( lock != retvalue )
 	  mutexlock (retvalue->mutex);
 
