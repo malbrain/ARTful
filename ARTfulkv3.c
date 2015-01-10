@@ -23,8 +23,9 @@ typedef unsigned int uint;
 
 enum NodeType {
 	UnusedNode = 0, // node is not yet in use
-	SpanNode,		// node contains key bytes (up to 8) and leaf element
 	LeafSlot,		// node slot contains leaf offset
+	ValueSlot,		// node slot contains ARTval offset
+	SpanNode,		// node contains up to 8 key bytes and leaf element
 	Array4,			// node contains 4 radix slots & leaf element
 	Array16,		// node contains 16 radix slots & leaf element
 	Array64,		// node contains 64 radix slots & leaf element
@@ -47,15 +48,13 @@ typedef union {
 //  the first few fields are generic to all nodes:
 
 typedef struct {
-	ulong value:48;		// offset of leaf value that ended before this node
-	uchar fill[2];		// filler
+	ARTslot value[1];	// slot to a leaf value that ended before this node.
 } ARTgeneric;
 
 //	radix node with four slots and their key bytes:
 
 typedef struct {
-	ulong value:48;		// offset of leaf value that ended before this node
-	uchar fill[2];		// filler
+	ARTslot value[1];	// slot to a leaf value that ended before this node.
 	ARTslot radix[4];
 	uchar keys[4];
 } ARTnode4;
@@ -63,8 +62,7 @@ typedef struct {
 //	radix node with sixteen slots and their key bytes:
 
 typedef struct {
-	ulong value:48;		// offset of leaf value that ended before this node
-	uchar fill[2];		// filler
+	ARTslot value[1];	// slot to a leaf value that ended before this node.
 	ARTslot radix[16];
 	uchar keys[16];
 } ARTnode16;
@@ -72,8 +70,7 @@ typedef struct {
 //	radix node with sixty-four slots and a 256 key byte array:
 
 typedef struct {
-	ulong value:48;		// offset of leaf value that ended before this node
-	uchar fill[2];		// filler
+	ARTslot value[1];	// slot to a leaf value that ended before this node.
 	ARTslot radix[64];
 	uchar keys[256];
 } ARTnode64;
@@ -81,16 +78,14 @@ typedef struct {
 //	radix node all two hundred fifty six slots
 
 typedef struct {
-	ulong value:48;		// offset of leaf value that ended before this node
-	uchar fill[2];		// filler
+	ARTslot value[1];	// slot to a leaf value that ended before this node.
 	ARTslot radix[256];
 } ARTnode256;
 
 //	Span node containing up to 8 consecutive key bytes
 
 typedef struct {
-	ulong value:48;		// offset of leaf value that ended before this node
-	uchar fill[2];		// filler
+	ARTslot value[1];	// slot to a leaf value that ended before this node.
 	ARTslot next[1];	// next node under span
 	uchar bytes[8];
 } ARTspan;
@@ -366,6 +361,9 @@ uchar *chr;
 
 	while( off < keylen )
 	  switch( slot->type ) {
+	  case ValueSlot:
+		return 0;
+
 	  case LeafSlot:
 		return 0;
 
@@ -438,12 +436,13 @@ uchar *chr;
 	return slot->off * 8;
 }
 
-//	insert key/value into ARTful trie, returning old value offset
+//	insert key/value into ARTful trie, returning pointer to value slot.
 
-ulong ARTinsert (ARTthread *thread, uchar *key, uint keylen, ulong valueoffset)
+ARTslot *ARTinsert (ARTthread *thread, uchar *key, uint keylen)
 {
 ARTslot *prev, node[1], *lock, *slot;
 ARTspan *span, *span1, *span2;
+ARTslot *oldvalue, *retvalue;
 uint len, idx, max, off;
 uchar slot64, *update64;
 ARTnode4 *radix4;
@@ -452,14 +451,13 @@ ARTnode64 *radix64;
 ARTnode256 *radix256;
 ARTgeneric *generic;
 uchar *chr, type;
-ulong oldvalue;
 
 	slot = thread->trie->root;
-	oldvalue = 0;
+	oldvalue = NULL;
 	lock = NULL;
 	off = 0;
 
-	while( 1 ) {
+	while( off < keylen ) {
 	  node->bits = slot->bits;
 	  type = node->type;
 
@@ -481,9 +479,6 @@ ulong oldvalue;
 
 		lock = prev;
 	   }
-
-	  if( off == keylen )
-		break;
 
 	  switch( type ) {
 	  case SpanNode:
@@ -512,7 +507,7 @@ ulong oldvalue;
 		  span1 = (ARTspan *)(Arena + art_node(thread, SpanNode));
 		  memcpy (span1->bytes, span->bytes, idx);
 		  node->off = (uchar *)span1 - Arena >> 3;
-		  span1->value = span->value;
+		  *span1->value = *span->value;
 		  node->type = SpanNode;
 		  slot = span1->next;
 		  node->nslot = idx;
@@ -533,7 +528,7 @@ ulong oldvalue;
 		  // are we the first new node?
 
 		  if( !idx )
-			radix4->value = span->value;
+			*radix4->value = *span->value;
 
 		  slot->off = (uchar *)radix4 - Arena >> 3;
 		  slot->type = Array4;
@@ -555,8 +550,11 @@ ulong oldvalue;
 		  slot->nslot = max - idx;
 		  slot->type = SpanNode;
 		  *span2->next = *span->next;
-		} else
+		  slot = span2->value;
+		} else {
 		  *slot = *span->next;
+		  slot = radix4->value;
+		}
 
 		//  does key stop at radix/span node?
 
@@ -603,7 +601,7 @@ ulong oldvalue;
 		}
 
 		radix16->keys[max] = key[off++];
-		radix16->value = radix4->value;
+		*radix16->value = *radix4->value;
 		node->off = (uchar *)radix16 - Arena >> 3;
 		node->type = Array16;
 
@@ -650,7 +648,7 @@ ulong oldvalue;
 		node->type = Array64;
 
 		radix64->keys[key[off++]] = max;
-		radix64->value = radix16->value;
+		*radix64->value = *radix16->value;
 
 		//	fill in rest of the key bytes into
 		//	span nodes below.
@@ -693,7 +691,7 @@ ulong oldvalue;
 
 		node->type = Array256;
 		node->off = (uchar *)radix256 - Arena >> 3;
-		radix256->value = radix64->value;
+		*radix256->value = *radix64->value;
 
 		//	fill in the rest of the key bytes
 		//	into Span nodes below
@@ -713,19 +711,29 @@ ulong oldvalue;
 		slot = node;
 		break;
 
+	  case ValueSlot:
 	  case LeafSlot:
-		oldvalue = node->off * 8;
+	    *node->mutex = 0;
+		oldvalue = node;
 		slot = node;
 		break;
 	  }
+
+	  // did we drop down from Array/Span node w/empty slot?
+
+	  if( type > ValueSlot )
+		retvalue = slot;
+	  else
+		retvalue = prev;
 
 	  // fill in an empty slot with remaining key bytes
 	  // i.e. copy remaining key bytes to span nodes
 
 	  while( len = keylen - off ) {
 		span = (ARTspan *)(Arena + art_node(thread, SpanNode));
-		span->value = oldvalue;
-		oldvalue = 0;
+
+		if( oldvalue )
+			*span->value = *oldvalue;
 
 		if( len > sizeof(span->bytes) )
 		  len = sizeof(span->bytes);
@@ -734,18 +742,16 @@ ulong oldvalue;
 		slot->off = (uchar *)span - Arena >> 3;
 		slot->type = SpanNode;
 		slot->nslot = len;
+		oldvalue = NULL;
 
-		slot = span->next;
+		retvalue = slot = span->next;
 		off += len;
 	  }
 
-	  if( slot->off && slot->type != LeafSlot ) {
-		generic = (ARTgeneric *)(Arena + slot->off * 8);
-		generic->value = valueoffset;
-	  } else {
-		slot->off = valueoffset >> 3;
-		slot->type = LeafSlot;
-	  }
+	  // lock the slot for caller
+
+	  if( lock != retvalue )
+	  	mutexlock (retvalue->mutex);
 
 	  *node->mutex = 0;
 	  prev->bits = node->bits;
@@ -753,29 +759,30 @@ ulong oldvalue;
 	  if( update64 )
 		*update64 = slot64;
 
-	  if( lock && lock != prev )
+	  if( lock && lock != prev && lock != retvalue )
 		mutexrelease (lock->mutex);
-
-	  return oldvalue;
+if( retvalue->type > 2 )
+abort();
+	  return retvalue;
 	}
 
-	// set the leaf offset in the node
+	// return the leaf node slot
 
-	if( node->off && node->type != LeafSlot ) {
-		generic = (ARTgeneric *)(Arena + node->off * 8);
-		oldvalue = generic->value;
-		generic->value = valueoffset;
-	} else {
-		oldvalue = node->off * 8;
-		node->off = valueoffset >> 3;
-		node->type = LeafSlot;
-		prev->bits = node->bits;
-	}
+	if( slot->off && slot->type > ValueSlot ) {
+		generic = (ARTgeneric *)(Arena + slot->off * 8);
+		retvalue = generic->value;
+	} else
+		retvalue = slot;
 
-	if( lock )
+if( retvalue->type > 2 )
+abort();
+	if( lock != retvalue )
+	  mutexlock (retvalue->mutex);
+
+	if( lock && lock != retvalue )
 	  mutexrelease (lock->mutex);
 
-	return oldvalue;
+	return retvalue;
 }
 
 //  scan the keys stored in the ARTtrie
@@ -802,10 +809,14 @@ int last;
 	case SpanNode:
 		node->span = (ARTspan *)(Arena + slot->off * 8);
 
-		if( node->span->value ) {
+		if( node->span->value->type > 0 ) {
 		  fwrite (key, off, 1, stdout);
-		  val = (ARTval *)(Arena + node->span->value * 8);
-		  fwrite (val->value, val->len, 1, stdout);
+		  if( node->span->value->type == ValueSlot ) {
+		  	val = (ARTval *)(Arena + node->span->value->off * 8);
+			fwrite (val->value, val->len, 1, stdout);
+		  } else for( idx = 1; idx < node->span->value->off; idx++ )
+		    children++, fputc ('\n', stdout), fwrite (key, off, 1, stdout);
+
 		  fputc ('\n', stdout);
 		  children++;
 		}
@@ -817,19 +828,27 @@ int last;
 		return children;
 
 	case LeafSlot:	
+	case ValueSlot:	
 		fwrite (key, off, 1, stdout);
-		val = (ARTval *)(Arena + slot->off * 8);
-		fwrite (val->value, val->len, 1, stdout);
+		if( slot->type == ValueSlot ) {
+		  val = (ARTval *)(Arena + slot->off * 8);
+		  fwrite (val->value, val->len, 1, stdout);
+		} else for( idx = 1; idx < slot->off; idx++ )
+		  children++, fputc ('\n', stdout), fwrite (key, off, 1, stdout);
 		fputc ('\n', stdout);
-		return 1;
+		children++;
+		return children;
 
 	case Array4:
 		node->radix4 = (ARTnode4 *)(Arena + slot->off * 8);
 
-		if( node->radix4->value ) {
+		if( node->radix4->value->type > 0 ) {
 		  fwrite (key, off, 1, stdout);
-		  val = (ARTval *)(Arena + node->radix4->value * 8);
-		  fwrite (val->value, val->len, 1, stdout);
+		  if( node->radix4->value->type == ValueSlot ) {
+			val = (ARTval *)(Arena + node->radix4->value->off * 8);
+			fwrite (val->value, val->len, 1, stdout);
+		  } else for( idx = 1; idx < node->span->value->off; idx++ )
+		    children++, fputc ('\n', stdout), fwrite (key, off, 1, stdout);
 		  fputc ('\n', stdout);
 		  children++;
 		}
@@ -854,10 +873,13 @@ int last;
 	case Array16:
 		node->radix16 = (ARTnode16 *)(Arena + slot->off * 8);
 
-		if( node->radix16->value ) {
+		if( node->radix16->value->type > 0 ) {
 		  fwrite (key, off, 1, stdout);
-		  val = (ARTval *)(Arena + node->radix16->value * 8);
-		  fwrite (val->value, val->len, 1, stdout);
+		  if( node->radix16->value->type == ValueSlot ) {
+			val = (ARTval *)(Arena + node->radix16->value->off * 8);
+			fwrite (val->value, val->len, 1, stdout);
+		  } else for( idx = 1; idx < node->radix16->value->off; idx++ )
+		    children++, fputc ('\n', stdout), fwrite (key, off, 1, stdout);
 		  fputc ('\n', stdout);
 		  children++;
 		}
@@ -882,10 +904,13 @@ int last;
 	case Array64:
 		node->radix64 = (ARTnode64 *)(Arena + slot->off * 8);
 
-		if( node->radix64->value ) {
+		if( node->radix64->value->type > 0 ) {
 		  fwrite (key, off, 1, stdout);
-		  val = (ARTval *)(Arena + node->radix64->value * 8);
-		  fwrite (val->value, val->len, 1, stdout);
+		  if( node->radix64->value->type == ValueSlot ) {
+			val = (ARTval *)(Arena + node->radix64->value->off * 8);
+			fwrite (val->value, val->len, 1, stdout);
+		  } else for( idx = 1; idx < node->radix64->value->off; idx++ )
+		    children++, fputc ('\n', stdout), fwrite (key, off, 1, stdout);
 		  fputc ('\n', stdout);
 		  children++;
 		}
@@ -903,17 +928,20 @@ int last;
 	case Array256:
 		node->radix256 = (ARTnode256 *)(Arena + slot->off * 8);
 
-		if( node->radix256->value ) {
+		if( node->radix256->value->type > 0 ) {
 		  fwrite (key, off, 1, stdout);
-		  val = (ARTval *)(Arena + node->radix256->value * 8);
-		  fwrite (val->value, val->len, 1, stdout);
+		  if( node->radix256->value->type == ValueSlot ) {
+			val = (ARTval *)(Arena + node->radix256->value->off * 8);
+			fwrite (val->value, val->len, 1, stdout);
+		  } else for( idx = 1; idx < node->radix256->value->off; idx++ )
+		    children++, fputc ('\n', stdout), fwrite (key, off, 1, stdout);
 		  fputc ('\n', stdout);
 		  children++;
 		}
 
 		for( idx = 0; idx < 256; idx++ ) {
 		  key[off] = idx;
-		  children += ARTscan (key, off + 1, max, node->radix64->radix + idx);
+		  children += ARTscan (key, off + 1, max, node->radix256->radix + idx);
 		}
 
 		return children;
@@ -935,7 +963,10 @@ uint idx;
 		node->span = (ARTspan *)(Arena + slot->off * 8);
 		children = ARTcount (node->span->next);
 
-		if( node->span->value )
+		if( node->span->value->type > 0 )
+		  if( node->span->value->type == LeafSlot )
+			children += node->span->value->off;
+		  else
 			children++;
 
 		return children;
@@ -950,7 +981,10 @@ uint idx;
 		for( idx = 0; idx < slot->nslot; idx++ )
 			children += ARTcount (node->radix4->radix + idx);
 		
-		if( node->radix4->value )
+		if( node->radix4->value->type > 0 )
+		  if( node->span->value->type == LeafSlot )
+			children += node->span->value->off;
+		  else
 			children++;
 
 		return children;
@@ -962,7 +996,10 @@ uint idx;
 		for( idx = 0; idx < slot->nslot; idx++ )
 			children += ARTcount (node->radix16->radix + idx);
 		
-		if( node->radix16->value )
+		if( node->radix16->value->type > 0 )
+		  if( node->span->value->type == LeafSlot )
+			children += node->span->value->off;
+		  else
 			children++;
 
 		return children;
@@ -974,7 +1011,10 @@ uint idx;
 		for( idx = 0; idx < slot->nslot; idx++ )
 			children += ARTcount (node->radix64->radix + idx);
 		
-		if( node->radix64->value )
+		if( node->radix64->value->type > 0 )
+		  if( node->span->value->type == LeafSlot )
+			children += node->span->value->off;
+		  else
 			children++;
 
 		return children;
@@ -986,7 +1026,10 @@ uint idx;
 		for( idx = 0; idx < 256; idx++ )
 			children += ARTcount (node->radix256->radix + idx);
 		
-		if( node->radix256->value )
+		if( node->radix256->value->type > 0 )
+		  if( node->span->value->type == LeafSlot )
+			children += node->span->value->off;
+		  else
 			children++;
 
 		return children;
@@ -1028,8 +1071,8 @@ typedef struct {
 	ARTtrie *trie;
 } ThreadArg;
 
-#define ARTmaxkey 256
-#define ARTdepth 256
+#define ARTmaxkey 4096
+#define ARTdepth 4096
 
 //  standalone program to index file of keys
 //  then list them onto std-out
@@ -1038,13 +1081,14 @@ void *index_file (void *arg)
 {
 int line = 0, cnt = 0, cachecnt, idx;
 unsigned char key[ARTmaxkey];
-int len = 0, slot, type = 0;
 struct random_data buf[1];
 ulong offset, found = 0;
+int len = 0, type = 0;
 ThreadArg *args = arg;
 ARTthread *thread;
 uchar state[64];
 int vallen, ch;
+ARTslot *slot;
 uint next[1];
 ARTval *val;
 uint size;
@@ -1055,6 +1099,9 @@ FILE *in;
 	switch(args->type | 0x20)
 	{
 	case 'c':	// count keys
+		if( args->idx )
+			break;
+		fprintf(stderr, "started counting\n");
 		found = ARTcount (args->trie->root);
 		fprintf(stderr, "finished counting, found %ld keys\n", found);
 		break;
@@ -1064,8 +1111,7 @@ FILE *in;
 		memset (buf, 0, sizeof(buf));
 		initstate_r(args->idx * 100 + 100, state, 64, buf);
 		for( line = 0; line < size; line++ ) {
-		random_r(buf, next);
-
+			random_r(buf, next);
 			key[0] = next[0];
 			next[0] >>= 8;
 			key[1] = next[0];
@@ -1073,8 +1119,14 @@ FILE *in;
 			key[2] = next[0];
 			next[0] >>= 8;
 			key[3] = next[0];
-			if( ARTinsert (thread, key, 4, 8) )
+			slot = ARTinsert (thread, key, 4);
+			slot->type = LeafSlot;
+
+			if( slot->off )
 				found++;
+
+			slot->off++;
+			mutexrelease (slot->mutex);
 		}
 		fprintf(stderr, "finished inserting %d keys, duplicates %ld\n", line, found);
 		break;
@@ -1104,8 +1156,14 @@ FILE *in;
 			next[0] >>= 8;
 			key[7] = next[0];
 
-			if( ARTinsert (thread, key, (line % 8) + 1, 8) )
+			slot = ARTinsert (thread, key, (line % 8) + 1);
+			slot->type = LeafSlot;
+
+			if( slot->off )
 				found++;
+
+			slot->off++;
+			mutexrelease (slot->mutex);
 		}
 		fprintf(stderr, "finished inserting %d keys, duplicates %ld\n", line, found);
 		break;
@@ -1179,16 +1237,20 @@ FILE *in;
 			{
 			  line++;
 
-			  if( len > 10 ) {
-			    offset = art_space (thread, len - 10 + sizeof(ARTval));
-			    val = (ARTval *)(Arena + offset);
-			    memcpy (val->value, key + 10, len - 10);
-			    val->len = len - 10;
-			  } else
-				offset = 8;
+			  offset = art_space (thread, len - 10 + sizeof(ARTval));
+			  val = (ARTval *)(Arena + offset);
+			  memcpy (val->value, key + 10, len - 10);
+			  val->len = len - 10;
 
-			  if( ARTinsert (thread, key, 10, offset) )
+			  slot = ARTinsert (thread, key, 10);
+
+			  if( slot->type == ValueSlot )
 				  fprintf(stderr, "Duplicate key source: %d\n", line), exit(0);
+
+			  slot->type = ValueSlot;
+			  slot->off = offset >> 3;
+			  mutexrelease (slot->mutex);
+
 			  len = 0;
 			  continue;
 			}
@@ -1206,7 +1268,10 @@ FILE *in;
 			{
 			  line++;
 
-			  ARTinsert (thread, key, len, 8);
+			  slot = ARTinsert (thread, key, len);
+			  slot->type = LeafSlot;
+			  slot->off++;
+			  mutexrelease (slot->mutex);
 			  len = 0;
 			}
 			else if( len < ARTmaxkey && ch != '\r' )
@@ -1232,6 +1297,8 @@ FILE *in;
 		break;
 
 	case 's':
+		if( args->idx )
+			break;
 		fprintf(stderr, "started forward scan\n");
 		cnt = ARTscan (key, 0, sizeof(key), thread->trie->root);
 
