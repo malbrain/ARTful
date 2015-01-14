@@ -509,7 +509,7 @@ restart:
 
 		if( newslot->bits != prev->bits ) {
 		  mutexrelease (prev->mutex);
-		  goto restart;
+		  continue;
 		}
 
 		prev->dead = 1;
@@ -523,7 +523,8 @@ restart:
 		  newslot->off = (uchar *)node2->span - Arena >> 3;
 		  mutexlock (node->span->value->mutex);
 		  node2->span->value->bits = node->span->value->bits;
-		  mutexrelease (node2->span->value->mutex);
+		  node->span->value->dead = 1;
+		  *node2->span->value->mutex = 0;
 		  mutexrelease (node->span->value->mutex);
 		  newslot->type = SpanNode;
 		  slot = node2->span->next;
@@ -547,7 +548,8 @@ restart:
 		  if( !idx ) {
 			mutexlock (node->span->value->mutex);
 			node3->radix4->value->bits = node->span->value->bits;
-			mutexrelease (node3->radix4->value->mutex);
+			node->span->value->dead = 1;
+			*node3->radix4->value->mutex = 0;
 			mutexrelease (node->span->value->mutex);
 		  }
 
@@ -567,18 +569,27 @@ restart:
 		if( max - idx ) {
 		  node4->span = (ARTspan *)(Arena + art_node(thread, SpanNode));
 		  memcpy (node4->span->bytes, node->span->bytes + idx, max - idx);
-		  *node4->span->next = *node->span->next;
+		  mutexlock (node->span->next->mutex);
+		  node4->span->next->bits = node->span->next->bits;
+		  node->span->next->dead = 1;
+		  *node4->span->next->mutex = 0;
+		  mutexrelease (node->span->next->mutex);
+
 		  slot->off = (uchar *)node4->span - Arena >> 3;
 		  slot->nslot = max - idx;
 		  slot->type = SpanNode;
 
 		  slot = node4->span->value;
 		} else {
-		  *slot = *node->span->next;
+		  mutexlock (node->span->next->mutex);
+		  slot->bits = node->span->next->bits;
+		  node->span->next->dead = 1;
+		  *slot->mutex = 0;
+		  mutexrelease (node->span->next->mutex);
 		  slot = node3->radix4->value;
 		}
 
-		//  does key stop at radix/span node?
+		//  does key stop at the beginning of radix/span node?
 
 		if( off == keylen )
 		  break; 
@@ -613,7 +624,7 @@ restart:
 
 		if( newslot->bits != prev->bits ) {
 		  mutexrelease (prev->mutex);
-		  goto restart;
+		  continue;
 		}
 
 		// add to radix4 node if room
@@ -636,14 +647,15 @@ restart:
 		  node2->radix16->radix[idx].bits = slot->bits;
 		  node2->radix16->keys[idx] = node->radix4->keys[idx];
 		  slot->dead = 1;
+		  *node2->radix16->radix[idx].mutex = 0;
 		  mutexrelease (slot->mutex);
-		  mutexrelease (node2->radix16->radix[idx].mutex);
 		}
 
 		node2->radix16->keys[max] = key[off++];
 		mutexlock (node->radix4->value->mutex);
 		node2->radix16->value->bits = node->radix4->value->bits;
-		mutexrelease (node2->radix16->value->mutex);
+		node->radix4->value->dead = 1;
+		*node2->radix16->value->mutex = 0;
 		mutexrelease (node->radix4->value->mutex);
 
 		newslot->off = (uchar *)node2->radix16 - Arena >> 3;
@@ -676,7 +688,7 @@ restart:
 
 		if( newslot->bits != prev->bits ) {
 		  mutexrelease (prev->mutex);
-		  goto restart;
+		  continue;
 		}
 
 		// add to radix node if room
@@ -701,8 +713,8 @@ restart:
 		  node2->radix48->radix[idx].bits = slot->bits;
 		  node2->radix48->keys[node->radix16->keys[idx]] = idx;
 		  slot->dead = 1;
+		  *node2->radix48->radix[idx].mutex = 0;
 		  mutexrelease (slot->mutex);
-		  mutexrelease (node2->radix48->radix[idx].mutex);
 		}
 
 		newslot->off = (uchar *)node2->radix48 - Arena >> 3;
@@ -711,7 +723,8 @@ restart:
 		node2->radix48->keys[key[off++]] = max;
 		mutexlock (node->radix16->value->mutex);
 		node2->radix48->value->bits = node->radix16->value->bits;
-		mutexrelease (node2->radix48->value->mutex);
+		node->radix16->value->dead = 1;
+		*node2->radix48->value->mutex = 0;
 		mutexrelease (node->radix16->value->mutex);
 
 		//	fill in rest of the key bytes into
@@ -739,7 +752,7 @@ restart:
 
 		if( newslot->bits != prev->bits ) {
 		  mutexrelease (prev->mutex);
-		  goto restart;
+		  continue;
 		}
 
 		// add to radix node
@@ -763,15 +776,16 @@ restart:
 		  mutexlock (slot->mutex);
 		  node2->radix256->radix[idx].bits = slot->bits;
 		  slot->dead = 1;
+		  *node2->radix256->radix[idx].mutex = 0;
 		  mutexrelease (slot->mutex);
-		  mutexrelease (node2->radix256->radix[idx].mutex);
 		 }
 
 		newslot->type = Array256;
 		newslot->off = (uchar *)node2->radix256 - Arena >> 3;
 		mutexlock (node->radix48->value->mutex);
 		node2->radix256->value->bits = node->radix48->value->bits;
-		mutexrelease (node2->radix256->value->mutex);
+		node->radix48->value->dead = 1;
+		*node2->radix256->value->mutex = 0;
 		mutexrelease (node->radix48->value->mutex);
 
 		//	fill in the rest of the key bytes
@@ -784,10 +798,18 @@ restart:
 		slot = node->radix256->radix + key[off++];
 		continue;
 
-	 	// execution from case Array256 above
-		// will continue here on an empty slot
-
 	  case UnusedNode:
+		mutexlock (prev->mutex);
+		*newslot->mutex = 1;
+
+		//  see if slot changed values
+		//	and restart if so.
+
+		if( newslot->bits != prev->bits ) {
+		  mutexrelease (prev->mutex);
+		  continue;
+		}
+
 		slot = newslot;
 		break;
 
@@ -840,10 +862,11 @@ restart:
 	    *newslot->mutex = 0;
 	  }
 
+	  prev->bits = newslot->bits;
+
 	  if( update48 )
 		*update48 = slot48;
 
-	  prev->bits = newslot->bits;
 	  return retvalue;
 	}
 
@@ -1184,7 +1207,7 @@ FILE *in;
 #ifdef SPARSE
 			random_r(buf, next);
 #else
-			*next = line;
+			*next = line + size * args->idx;
 #endif
 			key[3] = next[0];
 			next[0] >>= 8;
@@ -1288,7 +1311,7 @@ FILE *in;
 #ifdef SPARSE
 			random_r(buf, next);
 #else
-			*next = line;
+			*next = line + size * args->idx;
 #endif
 			key[3] = next[0];
 			next[0] >>= 8;
