@@ -9,6 +9,7 @@ ARTfulkv2.c: advanced multi-threaded version that only latches one slot per inse
 ARTfulkv3.c: clean-up, move slot type to slot entry. Revamp cmd interface.
 ARTfulkv4.c: more clean-up.
 ARTfulkv5.c: Rework node locking.
+ARTfulkv6.c: experimental version.
 
 To compile the source code:
 cc -c ARTfulkv5.c -o ARTfulkv5 -O3 -lpthread
@@ -27,3 +28,5 @@ To time sorting and subsequent listing of 10 byte key pennysort file segments:
 
 To time sorting and subsequent listing of two arbitrary files:
 ./ARTfulkv5 xyz ws file1 file2
+
+An experimental version ARTfulkv6.c has better performance and a smaller footprint than ARTfulkv5.
