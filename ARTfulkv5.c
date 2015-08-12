@@ -3,6 +3,20 @@
 //	Author: Karl Malbrain, malbrain@cal.berkeley.edu
 //	Date:   13 JAN 15
 
+/*
+This work, including the source code, documentation
+and related data, is placed into the public domain.
+
+The orginal author is Karl Malbrain.
+
+THIS SOFTWARE IS PROVIDED AS-IS WITHOUT WARRANTY
+OF ANY KIND, NOT EVEN THE IMPLIED WARRANTY OF
+MERCHANTABILITY. THE AUTHOR OF THIS SOFTWARE,
+ASSUMES _NO_ RESPONSIBILITY FOR ANY CONSEQUENCE
+RESULTING FROM THE USE, MODIFICATION, OR
+REDISTRIBUTION OF THIS SOFTWARE.
+*/
+
 #define _FILE_OFFSET_BITS 64
 #define _LARGEFILE64_SOURCE
 #define _GNU_SOURCE
