@@ -4,7 +4,7 @@ ARTful
 ARTful radix tree preliminary version with initial support for inserts and finds only.
 
 Note:
-Please find a more recent version containing numerous bug fixes and that supports deletes at github.com/mlbrain/database.
+Please find a more recent version containing numerous bug fixes and that supports deletes at github.com/malbrain/database.
 
 ARTfulkv.c:	initial version with a latch for every slot in the radix trie.
 
